@@ -14,12 +14,30 @@ import os
 import time
 import threading
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования - ИСПОЛЬЗУЕМ ТОЛЬКО logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Токен бота и ID группы
-BOT_TOKEN = "8586664266:AAGeqvtRQffbiyAwfH-bRa0uxd-DskU6nAU"
-GROUP_CHAT_ID = -5126633040
+# Токен бота и ID группы (безопасное получение)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
+
+if not BOT_TOKEN:
+    logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
+    logging.error("👉 Решение: Зайди в Railway → Variables и добавь BOT_TOKEN")
+    exit(1)
+
+if not GROUP_CHAT_ID_STR:
+    logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
+    logging.error("👉 Решение: Зайди в Railway → Variables и добавь GROUP_CHAT_ID")
+    exit(1)
+
+try:
+    GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
+except ValueError:
+    logging.error(f"❌ ОШИБКА: GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
+    exit(1)
+
+logging.info(f"✅ Переменные загружены! GROUP_CHAT_ID: {GROUP_CHAT_ID}")
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -41,7 +59,7 @@ def get_db_connection():
         conn.row_factory = sqlite3.Row
         return conn
     except sqlite3.Error as e:
-        logger.error(f"❌ Ошибка подключения к базе данных: {e}")
+        logging.error(f"❌ Ошибка подключения к базе данных: {e}")
         raise
 
 # Состояния FSM
@@ -125,9 +143,9 @@ def init_db():
             ''', books_data)
         
         conn.commit()
-        logger.info("✅ База данных успешно инициализирована")
+        logging.info("✅ База данных успешно инициализирована")
     except Exception as e:
-        logger.error(f"❌ Ошибка при инициализации базы данных: {e}")
+        logging.error(f"❌ Ошибка при инициализации базы данных: {e}")
         raise
     finally:
         if conn:
@@ -144,7 +162,7 @@ def get_books_by_office(office):
         books = cursor.fetchall()
         return books
     except Exception as e:
-        logger.error(f"❌ Ошибка в get_books_by_office: {e}")
+        logging.error(f"❌ Ошибка в get_books_by_office: {e}")
         raise
     finally:
         if conn:
@@ -162,7 +180,7 @@ def book_exists_in_office(title, office):
         result = cursor.fetchone()
         return result
     except Exception as e:
-        logger.error(f"❌ Ошибка в book_exists_in_office: {e}")
+        logging.error(f"❌ Ошибка в book_exists_in_office: {e}")
         raise
     finally:
         if conn:
@@ -179,7 +197,7 @@ def update_book_status(title, office, status):
                       (status, title.lower(), office))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ Ошибка в update_book_status: {e}")
+        logging.error(f"❌ Ошибка в update_book_status: {e}")
         raise
     finally:
         if conn:
@@ -225,7 +243,7 @@ def create_booking(user_id, book_title, office, duration):
         conn.commit()
         return booking_id, end_time
     except Exception as e:
-        logger.error(f"❌ Ошибка в create_booking: {e}")
+        logging.error(f"❌ Ошибка в create_booking: {e}")
         raise
     finally:
         if conn:
@@ -245,7 +263,7 @@ def get_user_booking(user_id):
         result = cursor.fetchone()
         return result
     except Exception as e:
-        logger.error(f"❌ Ошибка в get_user_booking: {e}")
+        logging.error(f"❌ Ошибка в get_user_booking: {e}")
         raise
     finally:
         if conn:
@@ -277,7 +295,7 @@ def complete_booking(user_id, book_title, office):
         
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ Ошибка в complete_booking: {e}")
+        logging.error(f"❌ Ошибка в complete_booking: {e}")
         raise
     finally:
         if conn:
@@ -297,7 +315,7 @@ def register_user(user_id, first_name, last_name, telegram_id):
         ''', (user_id, first_name, last_name, telegram_id))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ Ошибка в register_user: {e}")
+        logging.error(f"❌ Ошибка в register_user: {e}")
         raise
     finally:
         if conn:
@@ -316,7 +334,7 @@ def update_user_office(telegram_id, office):
         ''', (office, telegram_id))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ Ошибка в update_user_office: {e}")
+        logging.error(f"❌ Ошибка в update_user_office: {e}")
         raise
     finally:
         if conn:
@@ -337,7 +355,7 @@ def get_user_info(telegram_id):
         result = cursor.fetchone()
         return result
     except Exception as e:
-        logger.error(f"❌ Ошибка в get_user_info: {e}")
+        logging.error(f"❌ Ошибка в get_user_info: {e}")
         raise
     finally:
         if conn:
@@ -418,7 +436,7 @@ async def safe_edit_message(message, text, reply_markup=None):
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
         if "message is not modified" in str(e):
-            logger.warning("Message not modified - sending as new message")
+            logging.warning("Message not modified - sending as new message")
             await message.answer(text, reply_markup=reply_markup)
         else:
             raise
@@ -648,7 +666,7 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             reply_markup=InlineKeyboardBuilder().button(text="Забронировать", callback_data="action_book").as_markup()
         )
     except Exception as e:
-        logger.error(f"❌ Ошибка при бронировании: {e}")
+        logging.error(f"❌ Ошибка при бронировании: {e}")
         await safe_edit_message(
             callback.message,
             "Произошла временная ошибка с базой данных. Пожалуйста, попробуйте позже.",
@@ -697,7 +715,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logger.error(f"❌ Ошибка отправки напоминания: {e}")
+                            logging.error(f"❌ Ошибка отправки напоминания: {e}")
                     
                     # Напоминание об окончании брони
                     if current_time >= booking_end:
@@ -708,7 +726,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logger.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
+                            logging.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
                 
                 elif duration == "1 неделя":
                     # Напоминание за день до окончания (5-й день)
@@ -721,7 +739,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logger.error(f"❌ Ошибка отправки напоминания за день: {e}")
+                            logging.error(f"❌ Ошибка отправки напоминания за день: {e}")
                 
                 elif duration == "1 месяц":
                     # Напоминание за неделю до окончания
@@ -733,11 +751,11 @@ async def check_reminders():
                                 f"Не забудь вернуть книгу '{book_title}' через неделю"
                             )
                         except Exception as e:
-                            logger.error(f"❌ Ошибка отправки напоминания за неделю: {e}")
+                            logging.error(f"❌ Ошибка отправки напоминания за неделю: {e}")
         
             conn.close()
         except Exception as e:
-            logger.error(f"❌ Ошибка при проверке напоминаний: {e}")
+            logging.error(f"❌ Ошибка при проверке напоминаний: {e}")
         
         # Проверяем каждые 5 минут
         await asyncio.sleep(300)
@@ -796,7 +814,7 @@ async def process_return_photo(message: Message, state: FSMContext):
         
         await state.clear()
     except Exception as e:
-        logger.error(f"❌ Ошибка при завершении бронирования: {e}")
+        logging.error(f"❌ Ошибка при завершении бронирования: {e}")
         await message.answer(
             "Произошла ошибка при обработке возврата. Пожалуйста, попробуйте ещё раз.",
             reply_markup=InlineKeyboardBuilder().button(text="Попробовать снова", callback_data=f"return_{book_title}").as_markup()
@@ -864,7 +882,7 @@ async def main():
         # Запускаем бота
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        logging.error(f"❌ Критическая ошибка при запуске бота: {e}")
         raise
 
 if __name__ == "__main__":
