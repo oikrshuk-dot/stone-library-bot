@@ -9,33 +9,36 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 import os
 import time
 import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Токен бота и ID группы (безопасное получение)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 
 if not BOT_TOKEN:
-    logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
+    logger.error("👉 Решение: Зайди в Railway → Variables и добавь BOT_TOKEN")
     exit(1)
 
 if not GROUP_CHAT_ID_STR:
-    logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
+    logger.error("👉 Решение: Зайди в Railway → Variables и добавь GROUP_CHAT_ID")
     exit(1)
 
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
 except ValueError:
-    logging.error(f"❌ ОШИБКА: GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
+    logger.error(f"❌ ОШИБКА: GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
     exit(1)
 
-logging.info(f"✅ Переменные загружены! GROUP_CHAT_ID: {GROUP_CHAT_ID}")
+logger.info(f"✅ Переменные загружены! GROUP_CHAT_ID: {GROUP_CHAT_ID}")
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -58,7 +61,7 @@ def get_db_connection():
             return conn
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower() and attempt < 4:
-                logging.warning(f"🔒 База данных заблокирована, попытка {attempt + 1}/5...")
+                logger.warning(f"🔒 База данных заблокирована, попытка {attempt + 1}/5...")
                 time.sleep(1 * (attempt + 1))
                 continue
             raise
@@ -146,9 +149,9 @@ def init_db():
             ''', books_data)
         
         conn.commit()
-        logging.info("✅ База данных успешно инициализирована")
+        logger.info("✅ База данных успешно инициализирована")
     except Exception as e:
-        logging.error(f"❌ Ошибка при инициализации базы данных: {e}")
+        logger.error(f"❌ Ошибка при инициализации базы данных: {e}")
         raise
     finally:
         if conn:
@@ -196,7 +199,7 @@ def update_book_status(title, office, status):
         conn.commit()
     except sqlite3.OperationalError as e:
         if "database is locked" in str(e).lower():
-            logging.warning("🔒 База данных заблокирована, повторная попытка...")
+            logger.warning("🔒 База данных заблокирована, повторная попытка...")
             time.sleep(1)
             update_book_status(title, office, status)
     finally:
@@ -244,7 +247,7 @@ def create_booking(user_id, book_title, office, duration):
         return booking_id, end_time
     except sqlite3.OperationalError as e:
         if "database is locked" in str(e).lower():
-            logging.warning("🔒 База данных заблокирована, повторная попытка...")
+            logger.warning("🔒 База данных заблокирована, повторная попытка...")
             time.sleep(1)
             return create_booking(user_id, book_title, office, duration)
         raise
@@ -424,16 +427,20 @@ async def safe_edit_message(message, text, reply_markup=None):
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
         if "message is not modified" in str(e):
-            logging.warning("Message not modified - sending as new message")
+            logger.warning("Message not modified - sending as new message")
             await message.answer(text, reply_markup=reply_markup)
         else:
             raise
+    except TelegramForbiddenError:
+        logger.warning("Can't edit message: bot was blocked by user")
+        return False
+    return True
 
 # ОБРАБОТЧИКИ
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """Обработчик команды /start"""
-    await state.clear()
+    # НЕ ОЧИЩАЕМ СОСТОЯНИЕ! Это важно для продолжения диалога
     await message.answer(
         "Привет! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
         reply_markup=get_start_keyboard()
@@ -442,17 +449,19 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "start")
 async def process_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик начала работы"""
+    # СНАЧАЛА УСТАНАВЛИВАЕМ СОСТОЯНИЕ!
+    await state.set_state(UserStates.waiting_for_name)
+    
     await callback.message.edit_text(
         "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
     )
-    await state.set_state(UserStates.waiting_for_name)
 
 @router.message(StateFilter(UserStates.waiting_for_name))
 async def process_name(message: Message, state: FSMContext):
     """Обработчик ввода имени и фамилии"""
     name_parts = message.text.split()
     if len(name_parts) < 2:
-        await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел.")
+        await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел. Пример: Иван Иванов")
         return
     
     first_name = name_parts[0]
@@ -462,20 +471,36 @@ async def process_name(message: Message, state: FSMContext):
     register_user(message.from_user.id, first_name, last_name, message.from_user.id)
     
     await state.update_data(first_name=first_name, last_name=last_name)
+    
     await message.answer(
         f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, чтобы я мог подсказать книги в наличии",
         reply_markup=get_office_keyboard()
     )
+    
     await state.set_state(UserStates.waiting_for_office)
 
-# ОБРАБОТЧИКИ КНОПОК
-@router.message(StateFilter(UserStates.waiting_for_office, 
-                           UserStates.waiting_for_confirmation,
-                           UserStates.waiting_for_duration))
-async def ignore_text_in_button_states(message: Message):
-    """Игнорирование текстовых сообщений в состояниях ожидания кнопок"""
-    await message.answer("Пожалуйста, используй кнопки для выбора. Текстовые сообщения в этом состоянии не обрабатываются.")
+# ОБРАБОТЧИКИ ДЛЯ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИЯХ ОЖИДАНИЯ КНОПОК
+@router.message(StateFilter(UserStates.waiting_for_office))
+async def handle_text_in_office_state(message: Message):
+    """Обработка текстовых сообщений в состоянии ожидания выбора офиса"""
+    await message.answer("Пожалуйста, используй кнопки для выбора офиса. Текстовые сообщения в этом состоянии не обрабатываются.")
 
+@router.message(StateFilter(UserStates.waiting_for_confirmation))
+async def handle_text_in_confirmation_state(message: Message):
+    """Обработка текстовых сообщений в состоянии ожидания подтверждения"""
+    await message.answer("Пожалуйста, используй кнопки для подтверждения бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
+
+@router.message(StateFilter(UserStates.waiting_for_duration))
+async def handle_text_in_duration_state(message: Message):
+    """Обработка текстовых сообщений в состоянии ожидания выбора срока"""
+    await message.answer("Пожалуйста, используй кнопки для выбора срока бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
+
+@router.message(StateFilter(UserStates.waiting_for_photo))
+async def handle_text_in_photo_state(message: Message):
+    """Обработка текстовых сообщений в состоянии ожидания фото"""
+    await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
+
+# ОБРАБОТЧИКИ КНОПОК
 @router.callback_query(StateFilter(UserStates.waiting_for_office), F.data.startswith("office_"))
 async def process_office(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора офиса"""
@@ -532,7 +557,7 @@ async def process_book_title(message: Message, state: FSMContext):
     first_name = data.get('first_name')
     
     if not office or not first_name:
-        await message.answer("Ошибка: данные о пользователе не найдены. Начните сначала.")
+        await message.answer("Ошибка: данные о пользователе не найдены. Начните сначала с команды /start")
         await state.clear()
         return
     
@@ -642,11 +667,14 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
         user_info = get_user_info(callback.from_user.id)
         if user_info:
             _, last_name, _ = user_info
-            await bot.send_message(
-                GROUP_CHAT_ID,
-                f"Пользователь {first_name} {last_name} (ID: {callback.from_user.id}) "
-                f"забронировал книгу '{book_title}' на срок {duration}"
-            )
+            try:
+                await bot.send_message(
+                    GROUP_CHAT_ID,
+                    f"Пользователь {first_name} {last_name} (ID: {callback.from_user.id}) "
+                    f"забронировал книгу '{book_title}' на срок {duration}"
+                )
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки в группу: {e}")
         
         await safe_edit_message(
             callback.message,
@@ -654,7 +682,7 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             reply_markup=InlineKeyboardBuilder().button(text="Забронировать", callback_data="action_book").as_markup()
         )
     except Exception as e:
-        logging.error(f"❌ Ошибка при бронировании: {e}")
+        logger.error(f"❌ Ошибка при бронировании: {e}")
         await safe_edit_message(
             callback.message,
             "Произошла временная ошибка с базой данных. Пожалуйста, попробуйте позже.",
@@ -672,7 +700,7 @@ async def check_reminders():
             cursor = conn.cursor()
             
             cursor.execute('''
-            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name, office
+            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name
             FROM users 
             WHERE status = 'booked' AND booking_end IS NOT NULL
             ''')
@@ -681,13 +709,16 @@ async def check_reminders():
             current_time = datetime.now()
             
             for user in users:
-                user_id, book_title, booking_start_str, duration, booking_end_str, first_name, office = user
+                user_id, book_title, booking_start_str, duration, booking_end_str, first_name = user
                 
                 if not booking_start_str or not booking_end_str:
                     continue
                 
-                booking_start = datetime.fromisoformat(booking_start_str)
-                booking_end = datetime.fromisoformat(booking_end_str)
+                try:
+                    booking_start = datetime.fromisoformat(booking_start_str)
+                    booking_end = datetime.fromisoformat(booking_end_str)
+                except ValueError:
+                    continue
                 
                 if duration == "1 час":
                     reminder_time = booking_end - timedelta(minutes=15)
@@ -700,7 +731,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logging.error(f"❌ Ошибка отправки напоминания: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания: {e}")
                     
                     if current_time >= booking_end:
                         try:
@@ -710,11 +741,11 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logging.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
             
             conn.close()
         except Exception as e:
-            logging.error(f"❌ Ошибка при проверке напоминаний: {e}")
+            logger.error(f"❌ Ошибка при проверке напоминаний: {e}")
         
         await asyncio.sleep(300)
 
@@ -752,13 +783,17 @@ async def process_return_photo(message: Message, state: FSMContext):
     try:
         complete_booking(message.from_user.id, book_title, office)
         
+        # Отправляем уведомление в группу с фото и Telegram ID
         photo = message.photo[-1]
-        await bot.send_photo(
-            GROUP_CHAT_ID,
-            photo.file_id,
-            caption=f"Пользователь {first_name} {last_name} (ID: {message.from_user.id}) "
-                    f"вернул книгу '{book_title}'"
-        )
+        try:
+            await bot.send_photo(
+                GROUP_CHAT_ID,
+                photo.file_id,
+                caption=f"Пользователь {first_name} {last_name} (ID: {message.from_user.id}) "
+                        f"вернул книгу '{book_title}'"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки фото в группу: {e}")
         
         await message.answer(
             "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе.",
@@ -767,16 +802,11 @@ async def process_return_photo(message: Message, state: FSMContext):
         
         await state.clear()
     except Exception as e:
-        logging.error(f"❌ Ошибка при завершении бронирования: {e}")
+        logger.error(f"❌ Ошибка при завершении бронирования: {e}")
         await message.answer(
             "Произошла ошибка при обработке возврата. Пожалуйста, попробуйте ещё раз.",
             reply_markup=InlineKeyboardBuilder().button(text="Попробовать снова", callback_data=f"return_{book_title}").as_markup()
         )
-
-@router.message(StateFilter(UserStates.waiting_for_photo))
-async def ignore_text_during_photo(message: Message):
-    """Игнорирование текстовых сообщений при ожидании фото"""
-    await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
 
 # ОБРАБОТЧИК КНОПКИ "ЗАБРОНИРОВАТЬ" ПОСЛЕ УСПЕШНОГО БРОНИРОВАНИЯ
 @router.callback_query(F.data == "action_book")
@@ -786,8 +816,7 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
     
     if not user_info:
         await callback.message.edit_text(
-            "Похоже, мы с тобой ещё не знакомились. Напиши, пожалуйста, свои Имя и Фамилию",
-            reply_markup=None
+            "Похоже, мы с тобой ещё не знакомились. Напиши, пожалуйста, свои Имя и Фамилию"
         )
         await state.set_state(UserStates.waiting_for_name)
         return
@@ -820,9 +849,13 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
 # ФУНКЦИЯ ЗАПУСКА БОТА
 async def main():
     """Основная функция запуска бота"""
-    init_db()
-    asyncio.create_task(check_reminders())
-    await dp.start_polling(bot)
+    try:
+        init_db()
+        asyncio.create_task(check_reminders())
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
