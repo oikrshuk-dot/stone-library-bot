@@ -741,6 +741,48 @@ async def process_return_photo(message: Message, state: FSMContext):
 async def ignore_text_during_photo(message: Message):
     await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
 
+# Обработчик для кнопки "Забронировать" в состоянии без FSM (после успешного бронирования)
+@router.callback_query(F.data == "action_book")
+async def process_action_book_any_state(callback: CallbackQuery, state: FSMContext):
+    # Получаем информацию о пользователе из базы данных
+    user_info = get_user_info(callback.from_user.id)
+    
+    if not user_info:
+        await callback.message.edit_text(
+            "Похоже, мы с тобой ещё не знакомились. Напиши, пожалуйста, свои Имя и Фамилию",
+            reply_markup=None
+        )
+        await state.set_state(UserStates.waiting_for_name)
+        return
+    
+    first_name, last_name, office = user_info
+    
+    # Если у пользователя уже есть активное бронирование
+    booking_info = get_user_booking(callback.from_user.id)
+    if booking_info and booking_info[0]:
+        current_book, booking_start_str, duration, booking_end_str = booking_info
+        await callback.message.edit_text(
+            f"{first_name}, у тебя уже есть активное бронирование книги '{current_book}' на срок {duration}. "
+            f"Сначала верни эту книгу, прежде чем бронировать новую.",
+            reply_markup=get_booking_keyboard(current_book)
+        )
+        return
+    
+    # Если офис уже известен - переходим к выбору действия
+    if office:
+        await callback.message.edit_text(
+            "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+            reply_markup=get_action_keyboard()
+        )
+        await state.set_state(UserStates.waiting_for_book_title)
+    else:
+        # Если офис не известен - просим выбрать офис
+        await callback.message.edit_text(
+            f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, чтобы я мог подсказать книги в наличии",
+            reply_markup=get_office_keyboard()
+        )
+        await state.set_state(UserStates.waiting_for_office)
+
 # Функция запуска бота
 async def main():
     try:
@@ -757,4 +799,5 @@ async def main():
         close_db_connection()
 
 if __name__ == "__main__":
+
     asyncio.run(main())
