@@ -21,19 +21,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 
 if not BOT_TOKEN:
-    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
-    logger.error("👉 Решение: Зайди в Railway → Variables и добавь BOT_TOKEN")
+    logger.error("❌ BOT_TOKEN не установлен в Railway Variables!")
     exit(1)
 
 if not GROUP_CHAT_ID_STR:
-    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
-    logger.error("👉 Решение: Зайди в Railway → Variables и добавь GROUP_CHAT_ID")
+    logger.error("❌ GROUP_CHAT_ID не установлен в Railway Variables!")
     exit(1)
 
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
 except ValueError:
-    logger.error(f"❌ ОШИБКА: GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
+    logger.error(f"❌ GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
     exit(1)
 
 logger.info(f"✅ Переменные загружены! GROUP_CHAT_ID: {GROUP_CHAT_ID}")
@@ -54,80 +52,10 @@ class UserStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_photo = State()
 
-# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ (В /tmp для Railway)
+# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ (простое подключение к файлу в корне)
 def get_db_connection():
-    """Подключение к базе данных в /tmp для Railway"""
-    return sqlite3.connect('/tmp/library.db', check_same_thread=False)
-
-# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
-def init_db():
-    """Создание таблиц и первоначальное заполнение книгами"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Таблица пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        first_name TEXT,
-        last_name TEXT,
-        office TEXT,
-        current_book TEXT,
-        booking_start TEXT,
-        booking_duration TEXT,
-        booking_end TEXT,
-        status TEXT DEFAULT 'available',
-        telegram_id INTEGER UNIQUE NOT NULL
-    )
-    ''')
-    
-    # Таблица книг
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        author TEXT,
-        office TEXT,
-        status TEXT DEFAULT 'available'
-    )
-    ''')
-    
-    # Таблица бронирований
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS bookings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        book_title TEXT,
-        office TEXT,
-        start_time TEXT,
-        duration TEXT,
-        end_time TEXT,
-        status TEXT DEFAULT 'active',
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    
-    # Добавление книг только если их нет
-    cursor.execute('SELECT COUNT(*) FROM books')
-    if cursor.fetchone()[0] == 0:
-        books_data = [
-            ("книга а", "автор А", "Stone Towers"),
-            ("книга в", "автор В", "Stone Towers"),
-            ("книга с", "автор С", "Stone Towers"),
-            ("книга d", "автор D", "Manhatten"),
-            ("книга е", "автор E", "Manhatten"),
-            ("книга x", "автор Х", "Известия"),
-            ("книга z", "автор Z", "Известия"),
-            ("книга y", "автор У", "Известия")
-        ]
-        
-        cursor.executemany('''
-        INSERT INTO books (title, author, office) VALUES (?, ?, ?)
-        ''', books_data)
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ База данных успешно инициализирована")
+    """Подключение к базе данных из файла в корне проекта"""
+    return sqlite3.connect('library.db', check_same_thread=False)
 
 # ПОЛУЧЕНИЕ КНИГ ПО ОФИСУ
 def get_books_by_office(office):
@@ -369,11 +297,9 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "start")
 async def process_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик начала работы"""
-    # СНАЧАЛА ОТПРАВЛЯЕМ СООБЩЕНИЕ!
     await callback.message.edit_text(
         "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
     )
-    # ПОТОМ УСТАНАВЛИВАЕМ СОСТОЯНИЕ!
     await state.set_state(UserStates.waiting_for_name)
 
 @router.message(StateFilter(UserStates.waiting_for_name))
@@ -751,13 +677,10 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
 async def main():
     """Основная функция запуска бота"""
     try:
-        # Инициализация базы данных
-        init_db()
-        
         # Запускаем фоновую задачу для напоминаний
         asyncio.create_task(check_reminders())
         
-        # Запускаем бота
+        # Запускаем бота (база данных уже существует в файле)
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
