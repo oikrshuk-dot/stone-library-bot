@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest
 import os
 import time
 import threading
@@ -431,8 +431,8 @@ async def safe_edit_message(message, text, reply_markup=None):
             await message.answer(text, reply_markup=reply_markup)
         else:
             raise
-    except TelegramForbiddenError:
-        logger.warning("Can't edit message: bot was blocked by user")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при редактировании сообщения: {e}")
         return False
     return True
 
@@ -440,7 +440,7 @@ async def safe_edit_message(message, text, reply_markup=None):
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     """Обработчик команды /start"""
-    # НЕ ОЧИЩАЕМ СОСТОЯНИЕ! Это важно для продолжения диалога
+    await state.clear()
     await message.answer(
         "Привет! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
         reply_markup=get_start_keyboard()
@@ -453,7 +453,9 @@ async def process_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(UserStates.waiting_for_name)
     
     await callback.message.edit_text(
-        "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
+        "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+        "а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! "
+        "Напишите, пожалуйста свои Имя и Фамилию"
     )
 
 @router.message(StateFilter(UserStates.waiting_for_name))
@@ -479,24 +481,24 @@ async def process_name(message: Message, state: FSMContext):
     
     await state.set_state(UserStates.waiting_for_office)
 
-# ОБРАБОТЧИКИ ДЛЯ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИЯХ ОЖИДАНИЯ КНОПОК
+# ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИЯХ ОЖИДАНИЯ КНОПОК
 @router.message(StateFilter(UserStates.waiting_for_office))
-async def handle_text_in_office_state(message: Message):
+async def handle_text_in_office_state(message: Message, state: FSMContext):
     """Обработка текстовых сообщений в состоянии ожидания выбора офиса"""
     await message.answer("Пожалуйста, используй кнопки для выбора офиса. Текстовые сообщения в этом состоянии не обрабатываются.")
 
 @router.message(StateFilter(UserStates.waiting_for_confirmation))
-async def handle_text_in_confirmation_state(message: Message):
+async def handle_text_in_confirmation_state(message: Message, state: FSMContext):
     """Обработка текстовых сообщений в состоянии ожидания подтверждения"""
     await message.answer("Пожалуйста, используй кнопки для подтверждения бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
 
 @router.message(StateFilter(UserStates.waiting_for_duration))
-async def handle_text_in_duration_state(message: Message):
+async def handle_text_in_duration_state(message: Message, state: FSMContext):
     """Обработка текстовых сообщений в состоянии ожидания выбора срока"""
     await message.answer("Пожалуйста, используй кнопки для выбора срока бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
 
 @router.message(StateFilter(UserStates.waiting_for_photo))
-async def handle_text_in_photo_state(message: Message):
+async def handle_text_in_photo_state(message: Message, state: FSMContext):
     """Обработка текстовых сообщений в состоянии ожидания фото"""
     await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
 
