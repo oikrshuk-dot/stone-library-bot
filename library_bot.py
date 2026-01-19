@@ -17,14 +17,9 @@ import os
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота и ID группы (берутся из переменных окружения)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
-if not GROUP_CHAT_ID:
-    raise ValueError("GROUP_CHAT_ID не установлен в переменных окружения")
+# Токен бота и ID группы
+BOT_TOKEN = "8586664266:AAGeqvtRQffbiyAwfH-bRa0uxd-DskU6nAU"
+GROUP_CHAT_ID = -5126633040
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -800,3 +795,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
