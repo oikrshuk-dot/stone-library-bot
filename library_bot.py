@@ -107,9 +107,9 @@ def init_db():
     )
     ''')
     
-    # Добавление книг только если их нет
-    cursor.execute('SELECT COUNT(*) as count FROM books')
-    if cursor.fetchone()['count'] == 0:
+    # Добавление книг только если их нет (ИСПРАВЛЕНО)
+    cursor.execute('SELECT COUNT(*) FROM books')
+    if cursor.fetchone()[0] == 0:
         books_data = [
             ("книга а", "автор А", "Stone Towers"),
             ("книга в", "автор В", "Stone Towers"),
