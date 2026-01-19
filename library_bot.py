@@ -10,9 +10,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
+import os
 import time
 import threading
-import os
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -28,52 +28,21 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-# Глобальная блокировка для базы данных
-db_lock = threading.RLock()
-conn_cache = None
-
+# ГЛОБАЛЬНЫЙ ИСПРАВЛЕННЫЙ МЕТОД ДЛЯ БАЗЫ ДАННЫХ
 def get_db_connection():
-    """Получение соединения с базой данных с кэшированием и блокировками"""
-    global conn_cache
-    
-    with db_lock:
-        # Если есть кэшированное соединение и оно активно - используем его
-        if conn_cache is not None:
-            try:
-                conn_cache.execute("SELECT 1")
-                return conn_cache
-            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                pass
-        
-        # Создаём новое соединение
-        for attempt in range(10):  # Увеличиваем количество попыток
-            try:
-                conn = sqlite3.connect('library.db', 
-                                     check_same_thread=False, 
-                                     timeout=60,  # Увеличиваем таймаут
-                                     isolation_level=None)  # Авто-коммит
-                conn.row_factory = sqlite3.Row
-                conn_cache = conn
-                return conn
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < 9:
-                    logging.warning(f"Database locked, retry {attempt + 1}/10")
-                    time.sleep(1.0 * (attempt + 1))  # Увеличиваем задержку
-                    continue
-                raise
-        
-        raise sqlite3.OperationalError("Could not connect to database after 10 attempts")
-
-def close_db_connection():
-    """Закрытие соединения с базой данных"""
-    global conn_cache
-    with db_lock:
-        if conn_cache is not None:
-            try:
-                conn_cache.close()
-            except:
-                pass
-            conn_cache = None
+    """Надёжное получение соединения с базой данных"""
+    try:
+        # Всегда создаём НОВОЕ соединение (без кэширования!)
+        conn = sqlite3.connect(
+            'library.db',
+            check_same_thread=False,
+            timeout=30
+        )
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as e:
+        logger.error(f"❌ Ошибка подключения к базе данных: {e}")
+        raise
 
 # Состояния FSM
 class UserStates(StatesGroup):
@@ -86,218 +55,297 @@ class UserStates(StatesGroup):
 
 # Инициализация базы данных
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Таблица пользователей (обновлённая версия с telegram_id)
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        first_name TEXT,
-        last_name TEXT,
-        office TEXT,
-        current_book TEXT,
-        booking_start TEXT,
-        booking_duration TEXT,
-        booking_end TEXT,
-        status TEXT DEFAULT 'available',
-        telegram_id INTEGER UNIQUE NOT NULL
-    )
-    ''')
-    
-    # Таблица книг
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        author TEXT,
-        office TEXT,
-        status TEXT DEFAULT 'available'
-    )
-    ''')
-    
-    # Таблица бронирований
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS bookings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        book_title TEXT,
-        office TEXT,
-        start_time TEXT,
-        duration TEXT,
-        end_time TEXT,
-        status TEXT DEFAULT 'active',
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    
-    # Добавление книг в базу данных только если их нет
-    cursor.execute('SELECT COUNT(*) as count FROM books')
-    if cursor.fetchone()['count'] == 0:
-        books_data = [
-            # Stone Towers
-            ("книга а", "автор А", "Stone Towers"),
-            ("книга в", "автор В", "Stone Towers"),
-            ("книга с", "автор С", "Stone Towers"),
-            # Manhatten
-            ("книга d", "автор D", "Manhatten"),
-            ("книга е", "автор E", "Manhatten"),
-            # Известия
-            ("книга x", "автор Х", "Известия"),
-            ("книга z", "автор Z", "Известия"),
-            ("книга y", "автор У", "Известия")
-        ]
+    """Создание таблиц и первоначальное заполнение книгами"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        cursor.executemany('''
-        INSERT INTO books (title, author, office) VALUES (?, ?, ?)
-        ''', books_data)
-    
-    conn.commit()
-    conn.close()
-    logging.info("База данных инициализирована")
+        # Таблица пользователей (обновлённая версия с telegram_id)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
+            office TEXT,
+            current_book TEXT,
+            booking_start TEXT,
+            booking_duration TEXT,
+            booking_end TEXT,
+            status TEXT DEFAULT 'available',
+            telegram_id INTEGER UNIQUE NOT NULL
+        )
+        ''')
+        
+        # Таблица книг
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            author TEXT,
+            office TEXT,
+            status TEXT DEFAULT 'available'
+        )
+        ''')
+        
+        # Таблица бронирований
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            book_title TEXT,
+            office TEXT,
+            start_time TEXT,
+            duration TEXT,
+            end_time TEXT,
+            status TEXT DEFAULT 'active',
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
+        
+        # Добавление книг в базу данных только если их нет
+        cursor.execute('SELECT COUNT(*) as count FROM books')
+        if cursor.fetchone()['count'] == 0:
+            books_data = [
+                # Stone Towers
+                ("книга а", "автор А", "Stone Towers"),
+                ("книга в", "автор В", "Stone Towers"),
+                ("книга с", "автор С", "Stone Towers"),
+                # Manhatten
+                ("книга d", "автор D", "Manhatten"),
+                ("книга е", "автор E", "Manhatten"),
+                # Известия
+                ("книга x", "автор Х", "Известия"),
+                ("книга z", "автор Z", "Известия"),
+                ("книга y", "автор У", "Известия")
+            ]
+            
+            cursor.executemany('''
+            INSERT INTO books (title, author, office) VALUES (?, ?, ?)
+            ''', books_data)
+        
+        conn.commit()
+        logger.info("✅ База данных успешно инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при инициализации базы данных: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Получение книг по офису
 def get_books_by_office(office):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
-    books = cursor.fetchall()
-    conn.close()
-    return books
+    """Получение списка доступных книг в указанном офисе"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
+        books = cursor.fetchall()
+        return books
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_books_by_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Проверка существования книги в офисе
 def book_exists_in_office(title, office):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
-                  (title.lower(), office))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    """Проверка, существует ли книга в указанном офисе"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
+                      (title.lower(), office))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в book_exists_in_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Обновление статуса книги
 def update_book_status(title, office, status):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
-                  (status, title.lower(), office))
-    conn.commit()
-    conn.close()
+    """Обновление статуса книги в базе данных"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
+                      (status, title.lower(), office))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в update_book_status: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Создание бронирования
 def create_booking(user_id, book_title, office, duration):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Получаем текущее время
-    start_time = datetime.now()
-    
-    # Рассчитываем время окончания
-    if duration == "1 час":
-        end_time = start_time + timedelta(hours=1)
-    elif duration == "1 день":
-        end_time = start_time + timedelta(days=1)
-    elif duration == "1 неделя":
-        end_time = start_time + timedelta(weeks=1)
-    elif duration == "1 месяц":
-        end_time = start_time + timedelta(days=30)  # Упрощенно для 1 месяца
-    
-    # Создаем запись о бронировании
-    cursor.execute('''
-    INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
-    
-    # Обновляем статус книги
-    update_book_status(book_title, office, "booked")
-    
-    # Обновляем информацию о пользователе
-    cursor.execute('''
-    UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
-    WHERE user_id = ?
-    ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
-    
-    booking_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return booking_id, end_time
+    """Создание нового бронирования книги"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Получаем текущее время
+        start_time = datetime.now()
+        
+        # Рассчитываем время окончания
+        if duration == "1 час":
+            end_time = start_time + timedelta(hours=1)
+        elif duration == "1 день":
+            end_time = start_time + timedelta(days=1)
+        elif duration == "1 неделя":
+            end_time = start_time + timedelta(weeks=1)
+        elif duration == "1 месяц":
+            end_time = start_time + timedelta(days=30)  # Упрощенно для 1 месяца
+        
+        # Создаем запись о бронировании
+        cursor.execute('''
+        INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
+        
+        # Обновляем статус книги
+        update_book_status(book_title, office, "booked")
+        
+        # Обновляем информацию о пользователе
+        cursor.execute('''
+        UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
+        WHERE user_id = ?
+        ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
+        
+        booking_id = cursor.lastrowid
+        conn.commit()
+        return booking_id, end_time
+    except Exception as e:
+        logger.error(f"❌ Ошибка в create_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Получение информации о бронировании пользователя
 def get_user_booking(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT current_book, booking_start, booking_duration, booking_end 
-    FROM users WHERE user_id = ? AND status = 'booked'
-    ''', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    """Получение информации о текущем бронировании пользователя"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT current_book, booking_start, booking_duration, booking_end 
+        FROM users WHERE user_id = ? AND status = 'booked'
+        ''', (user_id,))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_user_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Завершение бронирования
 def complete_booking(user_id, book_title, office):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Обновляем статус книги
-    update_book_status(book_title, office, "available")
-    
-    # Обновляем статус пользователя
-    cursor.execute('''
-    UPDATE users SET current_book = NULL, booking_start = NULL, 
-    booking_duration = NULL, booking_end = NULL, status = 'available'
-    WHERE user_id = ?
-    ''', (user_id,))
-    
-    # Обновляем статус бронирования
-    cursor.execute('''
-    UPDATE bookings SET status = 'completed' 
-    WHERE user_id = ? AND book_title = ? AND status = 'active'
-    ''', (user_id, book_title))
-    
-    conn.commit()
-    conn.close()
+    """Завершение бронирования и возврат книги"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Обновляем статус книги
+        update_book_status(book_title, office, "available")
+        
+        # Обновляем статус пользователя
+        cursor.execute('''
+        UPDATE users SET current_book = NULL, booking_start = NULL, 
+        booking_duration = NULL, booking_end = NULL, status = 'available'
+        WHERE user_id = ?
+        ''', (user_id,))
+        
+        # Обновляем статус бронирования
+        cursor.execute('''
+        UPDATE bookings SET status = 'completed' 
+        WHERE user_id = ? AND book_title = ? AND status = 'active'
+        ''', (user_id, book_title))
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в complete_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Регистрация нового пользователя с Telegram ID
 def register_user(user_id, first_name, last_name, telegram_id):
     """Регистрация или обновление пользователя с сохранением Telegram ID"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT OR REPLACE INTO users 
-    (user_id, first_name, last_name, status, telegram_id) 
-    VALUES (?, ?, ?, 'available', ?)
-    ''', (user_id, first_name, last_name, telegram_id))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (user_id, first_name, last_name, status, telegram_id) 
+        VALUES (?, ?, ?, 'available', ?)
+        ''', (user_id, first_name, last_name, telegram_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в register_user: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Обновление офиса пользователя
 def update_user_office(telegram_id, office):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    UPDATE users SET office = ? 
-    WHERE telegram_id = ?
-    ''', (office, telegram_id))
-    conn.commit()
-    conn.close()
+    """Обновление офиса пользователя по его Telegram ID"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users SET office = ? 
+        WHERE telegram_id = ?
+        ''', (office, telegram_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в update_user_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Получение информации о пользователе по Telegram ID
 def get_user_info(telegram_id):
     """Получение информации о пользователе по Telegram ID"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT first_name, last_name, office 
-    FROM users 
-    WHERE telegram_id = ?
-    ''', (telegram_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT first_name, last_name, office 
+        FROM users 
+        WHERE telegram_id = ?
+        ''', (telegram_id,))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_user_info: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 # Формирование списка книг для сообщения
 def format_books_list(books):
+    """Форматирование списка книг для сообщения"""
     if not books:
         return "В этом офисе сейчас нет доступных книг."
     
@@ -308,11 +356,13 @@ def format_books_list(books):
 
 # Клавиатуры
 def get_start_keyboard():
+    """Клавиатура для начального сообщения"""
     builder = InlineKeyboardBuilder()
     builder.button(text="Начать", callback_data="start")
     return builder.as_markup()
 
 def get_office_keyboard():
+    """Клавиатура для выбора офиса"""
     builder = InlineKeyboardBuilder()
     builder.button(text="Stone Towers", callback_data="office_stone")
     builder.button(text="Manhatten", callback_data="office_manhatten")
@@ -321,6 +371,7 @@ def get_office_keyboard():
     return builder.as_markup()
 
 def get_action_keyboard():
+    """Клавиатура для выбора действия (бронировать/список)"""
     builder = InlineKeyboardBuilder()
     builder.button(text="Забронировать", callback_data="action_book")
     builder.button(text="Ознакомиться со списком", callback_data="action_list")
@@ -328,6 +379,7 @@ def get_action_keyboard():
     return builder.as_markup()
 
 def get_confirmation_keyboard():
+    """Клавиатура для подтверждения бронирования"""
     builder = InlineKeyboardBuilder()
     builder.button(text="Да", callback_data="confirm_yes")
     builder.button(text="Нет", callback_data="confirm_no")
@@ -335,6 +387,7 @@ def get_confirmation_keyboard():
     return builder.as_markup()
 
 def get_duration_keyboard():
+    """Клавиатура для выбора срока бронирования"""
     builder = InlineKeyboardBuilder()
     builder.button(text="1 час", callback_data="duration_1h")
     builder.button(text="1 день", callback_data="duration_1d")
@@ -344,6 +397,7 @@ def get_duration_keyboard():
     return builder.as_markup()
 
 def get_return_options_keyboard():
+    """Клавиатура для опций после отмены бронирования"""
     builder = InlineKeyboardBuilder()
     builder.button(text="Не бронирую", callback_data="return_cancel")
     builder.button(text="Забронировать другую", callback_data="return_another")
@@ -351,6 +405,7 @@ def get_return_options_keyboard():
     return builder.as_markup()
 
 def get_booking_keyboard(book_title):
+    """Клавиатура для возврата книги"""
     builder = InlineKeyboardBuilder()
     builder.button(text=f"Книга {book_title} возвращена", callback_data=f"return_{book_title}")
     builder.adjust(1)
@@ -363,7 +418,7 @@ async def safe_edit_message(message, text, reply_markup=None):
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as e:
         if "message is not modified" in str(e):
-            logging.warning("Message not modified - sending as new message")
+            logger.warning("Message not modified - sending as new message")
             await message.answer(text, reply_markup=reply_markup)
         else:
             raise
@@ -371,6 +426,7 @@ async def safe_edit_message(message, text, reply_markup=None):
 # Обработчики
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    """Обработчик команды /start"""
     await state.clear()
     await message.answer(
         "Привет! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
@@ -379,6 +435,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "start")
 async def process_start(callback: CallbackQuery, state: FSMContext):
+    """Обработчик начала работы"""
     await callback.message.edit_text(
         "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
     )
@@ -386,6 +443,7 @@ async def process_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(StateFilter(UserStates.waiting_for_name))
 async def process_name(message: Message, state: FSMContext):
+    """Обработчик ввода имени и фамилии"""
     name_parts = message.text.split()
     if len(name_parts) < 2:
         await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел.")
@@ -409,10 +467,12 @@ async def process_name(message: Message, state: FSMContext):
                            UserStates.waiting_for_confirmation,
                            UserStates.waiting_for_duration))
 async def ignore_text_in_button_states(message: Message):
+    """Игнорирование текстовых сообщений в состояниях ожидания кнопок"""
     await message.answer("Пожалуйста, используй кнопки для выбора. Текстовые сообщения в этом состоянии не обрабатываются.")
 
 @router.callback_query(StateFilter(UserStates.waiting_for_office), F.data.startswith("office_"))
 async def process_office(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора офиса"""
     office_map = {
         "office_stone": "Stone Towers",
         "office_manhatten": "Manhatten", 
@@ -436,11 +496,13 @@ async def process_office(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_book_title), F.data == "action_book")
 async def process_action_book(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Забронировать'"""
     await callback.message.edit_text("Напиши, пожалуйста, название книги")
     await state.set_state(UserStates.waiting_for_book_title)
 
 @router.callback_query(StateFilter(UserStates.waiting_for_book_title), F.data == "action_list")
 async def process_action_list(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Ознакомиться со списком'"""
     data = await state.get_data()
     office = data.get('office')
     
@@ -458,6 +520,7 @@ async def process_action_list(callback: CallbackQuery, state: FSMContext):
 
 @router.message(StateFilter(UserStates.waiting_for_book_title))
 async def process_book_title(message: Message, state: FSMContext):
+    """Обработчик ввода названия книги"""
     data = await state.get_data()
     office = data.get('office')
     first_name = data.get('first_name')
@@ -499,6 +562,7 @@ async def process_book_title(message: Message, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "confirm_yes")
 async def process_confirmation_yes(callback: CallbackQuery, state: FSMContext):
+    """Обработчик подтверждения бронирования"""
     data = await state.get_data()
     first_name = data.get('first_name')
     
@@ -510,6 +574,7 @@ async def process_confirmation_yes(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "confirm_no")
 async def process_confirmation_no(callback: CallbackQuery, state: FSMContext):
+    """Обработчик отмены бронирования"""
     await callback.message.edit_text(
         "Ты не будешь бронировать книгу или ты решил забронировать другую?",
         reply_markup=InlineKeyboardBuilder()
@@ -522,6 +587,7 @@ async def process_confirmation_no(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "return_cancel")
 async def process_return_cancel(callback: CallbackQuery, state: FSMContext):
+    """Обработчик отмены бронирования и возврата в главное меню"""
     await callback.message.edit_text(
         "Если захочешь забронировать книгу, просто нажми кнопку забронировать",
         reply_markup=InlineKeyboardBuilder().button(text="Забронировать", callback_data="action_book").as_markup()
@@ -530,6 +596,7 @@ async def process_return_cancel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "return_another")
 async def process_return_another(callback: CallbackQuery, state: FSMContext):
+    """Обработчик перехода к бронированию другой книги"""
     data = await state.get_data()
     office = data.get('office')
     
@@ -541,6 +608,7 @@ async def process_return_another(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_duration), F.data.startswith("duration_"))
 async def process_duration(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора срока бронирования"""
     duration_map = {
         "duration_1h": "1 час",
         "duration_1d": "1 день", 
@@ -579,8 +647,8 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             f"{first_name}, ты забронировал книгу '{book_title}' на {duration}. Я напомню тебе, когда ты должен вернуть книгу!",
             reply_markup=InlineKeyboardBuilder().button(text="Забронировать", callback_data="action_book").as_markup()
         )
-    except sqlite3.OperationalError as e:
-        logging.error(f"Ошибка базы данных: {e}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при бронировании: {e}")
         await safe_edit_message(
             callback.message,
             "Произошла временная ошибка с базой данных. Пожалуйста, попробуйте позже.",
@@ -591,6 +659,7 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
 
 # Фоновая задача для проверки напоминаний
 async def check_reminders():
+    """Фоновая задача для отправки напоминаний о возврате книг"""
     while True:
         try:
             conn = get_db_connection()
@@ -628,7 +697,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания: {e}")
                     
                     # Напоминание об окончании брони
                     if current_time >= booking_end:
@@ -639,7 +708,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания об окончании: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
                 
                 elif duration == "1 неделя":
                     # Напоминание за день до окончания (5-й день)
@@ -652,7 +721,7 @@ async def check_reminders():
                                 reply_markup=get_booking_keyboard(book_title)
                             )
                         except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания за день: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания за день: {e}")
                 
                 elif duration == "1 месяц":
                     # Напоминание за неделю до окончания
@@ -664,11 +733,11 @@ async def check_reminders():
                                 f"Не забудь вернуть книгу '{book_title}' через неделю"
                             )
                         except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания за неделю: {e}")
+                            logger.error(f"❌ Ошибка отправки напоминания за неделю: {e}")
         
             conn.close()
         except Exception as e:
-            logging.error(f"Ошибка при проверке напоминаний: {e}")
+            logger.error(f"❌ Ошибка при проверке напоминаний: {e}")
         
         # Проверяем каждые 5 минут
         await asyncio.sleep(300)
@@ -676,6 +745,7 @@ async def check_reminders():
 # Обработчик кнопки возврата книги
 @router.callback_query(F.data.startswith("return_"))
 async def process_return_book(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки возврата книги"""
     book_title = callback.data.replace("return_", "")
     
     # Получаем информацию о пользователе по Telegram ID
@@ -699,6 +769,7 @@ async def process_return_book(callback: CallbackQuery, state: FSMContext):
 # Обработчик фото при возврате
 @router.message(StateFilter(UserStates.waiting_for_photo), F.photo)
 async def process_return_photo(message: Message, state: FSMContext):
+    """Обработчик фото при возврате книги"""
     data = await state.get_data()
     book_title = data.get('book_title')
     office = data.get('office')
@@ -725,7 +796,7 @@ async def process_return_photo(message: Message, state: FSMContext):
         
         await state.clear()
     except Exception as e:
-        logging.error(f"Ошибка при завершении бронирования: {e}")
+        logger.error(f"❌ Ошибка при завершении бронирования: {e}")
         await message.answer(
             "Произошла ошибка при обработке возврата. Пожалуйста, попробуйте ещё раз.",
             reply_markup=InlineKeyboardBuilder().button(text="Попробовать снова", callback_data=f"return_{book_title}").as_markup()
@@ -734,11 +805,13 @@ async def process_return_photo(message: Message, state: FSMContext):
 # Игнорируем текстовые сообщения в состоянии ожидания фото
 @router.message(StateFilter(UserStates.waiting_for_photo))
 async def ignore_text_during_photo(message: Message):
+    """Игнорирование текстовых сообщений при ожидании фото"""
     await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
 
 # Обработчик для кнопки "Забронировать" в состоянии без FSM (после успешного бронирования)
 @router.callback_query(F.data == "action_book")
 async def process_action_book_any_state(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Забронировать' в любом состоянии"""
     # Получаем информацию о пользователе по Telegram ID
     user_info = get_user_info(callback.from_user.id)
     
@@ -780,6 +853,7 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
 
 # Функция запуска бота
 async def main():
+    """Основная функция запуска бота"""
     try:
         # Инициализация базы данных
         init_db()
@@ -789,10 +863,9 @@ async def main():
         
         # Запускаем бота
         await dp.start_polling(bot)
-    finally:
-        # Закрываем соединение с базой данных при завершении
-        close_db_connection()
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
-
