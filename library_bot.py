@@ -11,8 +11,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 import os
-import time
-import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -47,30 +45,6 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-# ГЛОБАЛЬНАЯ БЛОКИРОВКА ДЛЯ БАЗЫ ДАННЫХ
-db_lock = threading.Lock()
-
-# НАДЁЖНОЕ ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
-def get_db_connection():
-    """Надёжное подключение к базе данных"""
-    for attempt in range(5):
-        try:
-            db_lock.acquire()
-            conn = sqlite3.connect('library.db', check_same_thread=False, timeout=30)
-            conn.row_factory = sqlite3.Row
-            return conn
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e).lower() and attempt < 4:
-                logger.warning(f"🔒 База данных заблокирована, попытка {attempt + 1}/5...")
-                time.sleep(1 * (attempt + 1))
-                continue
-            raise
-        finally:
-            if 'conn' not in locals() or conn is None:
-                db_lock.release()
-    
-    raise sqlite3.OperationalError("❌ Не удалось подключиться к базе данных после 5 попыток")
-
 # СОСТОЯНИЯ FSM
 class UserStates(StatesGroup):
     waiting_for_name = State()
@@ -80,277 +54,227 @@ class UserStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_photo = State()
 
+# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
+def get_db_connection():
+    """Простое подключение к базе данных"""
+    return sqlite3.connect('library.db', check_same_thread=False)
+
 # ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 def init_db():
     """Создание таблиц и первоначальное заполнение книгами"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Таблица пользователей
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        first_name TEXT,
+        last_name TEXT,
+        office TEXT,
+        current_book TEXT,
+        booking_start TEXT,
+        booking_duration TEXT,
+        booking_end TEXT,
+        status TEXT DEFAULT 'available',
+        telegram_id INTEGER UNIQUE NOT NULL
+    )
+    ''')
+    
+    # Таблица книг
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS books (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        author TEXT,
+        office TEXT,
+        status TEXT DEFAULT 'available'
+    )
+    ''')
+    
+    # Таблица бронирований
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        book_title TEXT,
+        office TEXT,
+        start_time TEXT,
+        duration TEXT,
+        end_time TEXT,
+        status TEXT DEFAULT 'active',
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    # Добавление книг только если их нет
+    cursor.execute('SELECT COUNT(*) as count FROM books')
+    if cursor.fetchone()['count'] == 0:
+        books_data = [
+            ("книга а", "автор А", "Stone Towers"),
+            ("книга в", "автор В", "Stone Towers"),
+            ("книга с", "автор С", "Stone Towers"),
+            ("книга d", "автор D", "Manhatten"),
+            ("книга е", "автор E", "Manhatten"),
+            ("книга x", "автор Х", "Известия"),
+            ("книга z", "автор Z", "Известия"),
+            ("книга y", "автор У", "Известия")
+        ]
         
-        # Таблица пользователей
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            first_name TEXT,
-            last_name TEXT,
-            office TEXT,
-            current_book TEXT,
-            booking_start TEXT,
-            booking_duration TEXT,
-            booking_end TEXT,
-            status TEXT DEFAULT 'available',
-            telegram_id INTEGER UNIQUE NOT NULL
-        )
-        ''')
-        
-        # Таблица книг
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS books (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            author TEXT,
-            office TEXT,
-            status TEXT DEFAULT 'available'
-        )
-        ''')
-        
-        # Таблица бронирований
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bookings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            book_title TEXT,
-            office TEXT,
-            start_time TEXT,
-            duration TEXT,
-            end_time TEXT,
-            status TEXT DEFAULT 'active',
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
-        )
-        ''')
-        
-        # Добавление книг только если их нет
-        cursor.execute('SELECT COUNT(*) as count FROM books')
-        if cursor.fetchone()['count'] == 0:
-            books_data = [
-                ("книга а", "автор А", "Stone Towers"),
-                ("книга в", "автор В", "Stone Towers"),
-                ("книга с", "автор С", "Stone Towers"),
-                ("книга d", "автор D", "Manhatten"),
-                ("книга е", "автор E", "Manhatten"),
-                ("книга x", "автор Х", "Известия"),
-                ("книга z", "автор Z", "Известия"),
-                ("книга y", "автор У", "Известия")
-            ]
-            
-            cursor.executemany('''
-            INSERT INTO books (title, author, office) VALUES (?, ?, ?)
-            ''', books_data)
-        
-        conn.commit()
-        logger.info("✅ База данных успешно инициализирована")
-    except Exception as e:
-        logger.error(f"❌ Ошибка при инициализации базы данных: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-            db_lock.release()
+        cursor.executemany('''
+        INSERT INTO books (title, author, office) VALUES (?, ?, ?)
+        ''', books_data)
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ База данных успешно инициализирована")
 
 # ПОЛУЧЕНИЕ КНИГ ПО ОФИСУ
 def get_books_by_office(office):
     """Получение списка доступных книг в указанном офисе"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
-        books = cursor.fetchall()
-        return books
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
+    books = cursor.fetchall()
+    conn.close()
+    return books
 
 # ПРОВЕРКА СУЩЕСТВОВАНИЯ КНИГИ В ОФИСЕ
 def book_exists_in_office(title, office):
     """Проверка, существует ли книга в указанном офисе"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
-                      (title.lower(), office))
-        result = cursor.fetchone()
-        return result
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
+                  (title.lower(), office))
+    result = cursor.fetchone()
+    conn.close()
+    return result
 
 # ОБНОВЛЕНИЕ СТАТУСА КНИГИ
 def update_book_status(title, office, status):
     """Обновление статуса книги в базе данных"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
-                      (status, title.lower(), office))
-        conn.commit()
-    except sqlite3.OperationalError as e:
-        if "database is locked" in str(e).lower():
-            logger.warning("🔒 База данных заблокирована, повторная попытка...")
-            time.sleep(1)
-            update_book_status(title, office, status)
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
+                  (status, title.lower(), office))
+    conn.commit()
+    conn.close()
 
 # СОЗДАНИЕ БРОНИРОВАНИЯ
 def create_booking(user_id, book_title, office, duration):
     """Создание нового бронирования книги"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Получаем текущее время
-        start_time = datetime.now()
-        
-        # Рассчитываем время окончания
-        if duration == "1 час":
-            end_time = start_time + timedelta(hours=1)
-        elif duration == "1 день":
-            end_time = start_time + timedelta(days=1)
-        elif duration == "1 неделя":
-            end_time = start_time + timedelta(weeks=1)
-        elif duration == "1 месяц":
-            end_time = start_time + timedelta(days=30)
-        
-        # Создаем запись о бронировании
-        cursor.execute('''
-        INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
-        
-        # Обновляем статус книги
-        update_book_status(book_title, office, "booked")
-        
-        # Обновляем информацию о пользователе
-        cursor.execute('''
-        UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
-        WHERE user_id = ?
-        ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
-        
-        booking_id = cursor.lastrowid
-        conn.commit()
-        return booking_id, end_time
-    except sqlite3.OperationalError as e:
-        if "database is locked" in str(e).lower():
-            logger.warning("🔒 База данных заблокирована, повторная попытка...")
-            time.sleep(1)
-            return create_booking(user_id, book_title, office, duration)
-        raise
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Получаем текущее время
+    start_time = datetime.now()
+    
+    # Рассчитываем время окончания
+    if duration == "1 час":
+        end_time = start_time + timedelta(hours=1)
+    elif duration == "1 день":
+        end_time = start_time + timedelta(days=1)
+    elif duration == "1 неделя":
+        end_time = start_time + timedelta(weeks=1)
+    elif duration == "1 месяц":
+        end_time = start_time + timedelta(days=30)
+    
+    # Создаем запись о бронировании
+    cursor.execute('''
+    INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
+    
+    # Обновляем статус книги
+    update_book_status(book_title, office, "booked")
+    
+    # Обновляем информацию о пользователе
+    cursor.execute('''
+    UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
+    WHERE user_id = ?
+    ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
+    
+    booking_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return booking_id, end_time
 
 # ПОЛУЧЕНИЕ ИНФОРМАЦИИ О БРОНИРОВАНИИ ПОЛЬЗОВАТЕЛЯ
 def get_user_booking(user_id):
     """Получение информации о текущем бронировании пользователя"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT current_book, booking_start, booking_duration, booking_end 
-        FROM users WHERE user_id = ? AND status = 'booked'
-        ''', (user_id,))
-        result = cursor.fetchone()
-        return result
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT current_book, booking_start, booking_duration, booking_end 
+    FROM users WHERE user_id = ? AND status = 'booked'
+    ''', (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
 
 # ЗАВЕРШЕНИЕ БРОНИРОВАНИЯ
 def complete_booking(user_id, book_title, office):
     """Завершение бронирования и возврат книги"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Обновляем статус книги
-        update_book_status(book_title, office, "available")
-        
-        # Обновляем статус пользователя
-        cursor.execute('''
-        UPDATE users SET current_book = NULL, booking_start = NULL, 
-        booking_duration = NULL, booking_end = NULL, status = 'available'
-        WHERE user_id = ?
-        ''', (user_id,))
-        
-        # Обновляем статус бронирования
-        cursor.execute('''
-        UPDATE bookings SET status = 'completed' 
-        WHERE user_id = ? AND book_title = ? AND status = 'active'
-        ''', (user_id, book_title))
-        
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Обновляем статус книги
+    update_book_status(book_title, office, "available")
+    
+    # Обновляем статус пользователя
+    cursor.execute('''
+    UPDATE users SET current_book = NULL, booking_start = NULL, 
+    booking_duration = NULL, booking_end = NULL, status = 'available'
+    WHERE user_id = ?
+    ''', (user_id,))
+    
+    # Обновляем статус бронирования
+    cursor.execute('''
+    UPDATE bookings SET status = 'completed' 
+    WHERE user_id = ? AND book_title = ? AND status = 'active'
+    ''', (user_id, book_title))
+    
+    conn.commit()
+    conn.close()
 
-# РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ
+# РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ С TELEGRAM ID
 def register_user(user_id, first_name, last_name, telegram_id):
     """Регистрация или обновление пользователя с сохранением Telegram ID"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-        INSERT OR REPLACE INTO users 
-        (user_id, first_name, last_name, status, telegram_id) 
-        VALUES (?, ?, ?, 'available', ?)
-        ''', (user_id, first_name, last_name, telegram_id))
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    INSERT OR REPLACE INTO users 
+    (user_id, first_name, last_name, status, telegram_id) 
+    VALUES (?, ?, ?, 'available', ?)
+    ''', (user_id, first_name, last_name, telegram_id))
+    conn.commit()
+    conn.close()
 
 # ОБНОВЛЕНИЕ ОФИСА ПОЛЬЗОВАТЕЛЯ
 def update_user_office(telegram_id, office):
     """Обновление офиса пользователя по его Telegram ID"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-        UPDATE users SET office = ? 
-        WHERE telegram_id = ?
-        ''', (office, telegram_id))
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    UPDATE users SET office = ? 
+    WHERE telegram_id = ?
+    ''', (office, telegram_id))
+    conn.commit()
+    conn.close()
 
 # ПОЛУЧЕНИЕ ИНФОРМАЦИИ О ПОЛЬЗОВАТЕЛЕ
 def get_user_info(telegram_id):
     """Получение информации о пользователе по Telegram ID"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT first_name, last_name, office 
-        FROM users 
-        WHERE telegram_id = ?
-        ''', (telegram_id,))
-        result = cursor.fetchone()
-        return result
-    finally:
-        if conn:
-            conn.close()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT first_name, last_name, office 
+    FROM users 
+    WHERE telegram_id = ?
+    ''', (telegram_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result
 
 # ФОРМАТИРОВАНИЕ СПИСКА КНИГ
 def format_books_list(books):
@@ -431,10 +355,6 @@ async def safe_edit_message(message, text, reply_markup=None):
             await message.answer(text, reply_markup=reply_markup)
         else:
             raise
-    except Exception as e:
-        logger.error(f"❌ Ошибка при редактировании сообщения: {e}")
-        return False
-    return True
 
 # ОБРАБОТЧИКИ
 @router.message(CommandStart())
@@ -449,21 +369,19 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "start")
 async def process_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик начала работы"""
-    # СНАЧАЛА УСТАНАВЛИВАЕМ СОСТОЯНИЕ!
-    await state.set_state(UserStates.waiting_for_name)
-    
+    # СНАЧАЛА ОТПРАВЛЯЕМ СООБЩЕНИЕ!
     await callback.message.edit_text(
-        "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
-        "а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! "
-        "Напишите, пожалуйста свои Имя и Фамилию"
+        "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, а также забронировать ту книгу, которая вам интересна. Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
     )
+    # ПОТОМ УСТАНАВЛИВАЕМ СОСТОЯНИЕ!
+    await state.set_state(UserStates.waiting_for_name)
 
 @router.message(StateFilter(UserStates.waiting_for_name))
 async def process_name(message: Message, state: FSMContext):
     """Обработчик ввода имени и фамилии"""
     name_parts = message.text.split()
     if len(name_parts) < 2:
-        await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел. Пример: Иван Иванов")
+        await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел.")
         return
     
     first_name = name_parts[0]
@@ -473,36 +391,20 @@ async def process_name(message: Message, state: FSMContext):
     register_user(message.from_user.id, first_name, last_name, message.from_user.id)
     
     await state.update_data(first_name=first_name, last_name=last_name)
-    
     await message.answer(
         f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, чтобы я мог подсказать книги в наличии",
         reply_markup=get_office_keyboard()
     )
-    
     await state.set_state(UserStates.waiting_for_office)
 
-# ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИЯХ ОЖИДАНИЯ КНОПОК
-@router.message(StateFilter(UserStates.waiting_for_office))
-async def handle_text_in_office_state(message: Message, state: FSMContext):
-    """Обработка текстовых сообщений в состоянии ожидания выбора офиса"""
-    await message.answer("Пожалуйста, используй кнопки для выбора офиса. Текстовые сообщения в этом состоянии не обрабатываются.")
+# ОБРАБОТЧИКИ ДЛЯ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИЯХ ОЖИДАНИЯ КНОПОК
+@router.message(StateFilter(UserStates.waiting_for_office, 
+                           UserStates.waiting_for_confirmation,
+                           UserStates.waiting_for_duration))
+async def ignore_text_in_button_states(message: Message):
+    """Обработка текстовых сообщений в состояниях ожидания кнопок"""
+    await message.answer("Пожалуйста, используй кнопки для выбора. Текстовые сообщения в этом состоянии не обрабатываются.")
 
-@router.message(StateFilter(UserStates.waiting_for_confirmation))
-async def handle_text_in_confirmation_state(message: Message, state: FSMContext):
-    """Обработка текстовых сообщений в состоянии ожидания подтверждения"""
-    await message.answer("Пожалуйста, используй кнопки для подтверждения бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
-
-@router.message(StateFilter(UserStates.waiting_for_duration))
-async def handle_text_in_duration_state(message: Message, state: FSMContext):
-    """Обработка текстовых сообщений в состоянии ожидания выбора срока"""
-    await message.answer("Пожалуйста, используй кнопки для выбора срока бронирования. Текстовые сообщения в этом состоянии не обрабатываются.")
-
-@router.message(StateFilter(UserStates.waiting_for_photo))
-async def handle_text_in_photo_state(message: Message, state: FSMContext):
-    """Обработка текстовых сообщений в состоянии ожидания фото"""
-    await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
-
-# ОБРАБОТЧИКИ КНОПОК
 @router.callback_query(StateFilter(UserStates.waiting_for_office), F.data.startswith("office_"))
 async def process_office(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора офиса"""
@@ -559,7 +461,7 @@ async def process_book_title(message: Message, state: FSMContext):
     first_name = data.get('first_name')
     
     if not office or not first_name:
-        await message.answer("Ошибка: данные о пользователе не найдены. Начните сначала с команды /start")
+        await message.answer("Ошибка: данные о пользователе не найдены. Начните сначала.")
         await state.clear()
         return
     
@@ -669,14 +571,11 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
         user_info = get_user_info(callback.from_user.id)
         if user_info:
             _, last_name, _ = user_info
-            try:
-                await bot.send_message(
-                    GROUP_CHAT_ID,
-                    f"Пользователь {first_name} {last_name} (ID: {callback.from_user.id}) "
-                    f"забронировал книгу '{book_title}' на срок {duration}"
-                )
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки в группу: {e}")
+            await bot.send_message(
+                GROUP_CHAT_ID,
+                f"Пользователь {first_name} {last_name} (ID: {callback.from_user.id}) "
+                f"забронировал книгу '{book_title}' на срок {duration}"
+            )
         
         await safe_edit_message(
             callback.message,
@@ -702,7 +601,7 @@ async def check_reminders():
             cursor = conn.cursor()
             
             cursor.execute('''
-            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name
+            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name, office
             FROM users 
             WHERE status = 'booked' AND booking_end IS NOT NULL
             ''')
@@ -711,16 +610,13 @@ async def check_reminders():
             current_time = datetime.now()
             
             for user in users:
-                user_id, book_title, booking_start_str, duration, booking_end_str, first_name = user
+                user_id, book_title, booking_start_str, duration, booking_end_str, first_name, office = user
                 
                 if not booking_start_str or not booking_end_str:
                     continue
                 
-                try:
-                    booking_start = datetime.fromisoformat(booking_start_str)
-                    booking_end = datetime.fromisoformat(booking_end_str)
-                except ValueError:
-                    continue
+                booking_start = datetime.fromisoformat(booking_start_str)
+                booking_end = datetime.fromisoformat(booking_end_str)
                 
                 if duration == "1 час":
                     reminder_time = booking_end - timedelta(minutes=15)
@@ -787,15 +683,12 @@ async def process_return_photo(message: Message, state: FSMContext):
         
         # Отправляем уведомление в группу с фото и Telegram ID
         photo = message.photo[-1]
-        try:
-            await bot.send_photo(
-                GROUP_CHAT_ID,
-                photo.file_id,
-                caption=f"Пользователь {first_name} {last_name} (ID: {message.from_user.id}) "
-                        f"вернул книгу '{book_title}'"
-            )
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки фото в группу: {e}")
+        await bot.send_photo(
+            GROUP_CHAT_ID,
+            photo.file_id,
+            caption=f"Пользователь {first_name} {last_name} (ID: {message.from_user.id}) "
+                    f"вернул книгу '{book_title}'"
+        )
         
         await message.answer(
             "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе.",
@@ -809,6 +702,12 @@ async def process_return_photo(message: Message, state: FSMContext):
             "Произошла ошибка при обработке возврата. Пожалуйста, попробуйте ещё раз.",
             reply_markup=InlineKeyboardBuilder().button(text="Попробовать снова", callback_data=f"return_{book_title}").as_markup()
         )
+
+# ИГНОРИРОВАНИЕ ТЕКСТОВЫХ СООБЩЕНИЙ В СОСТОЯНИИ ОЖИДАНИЯ ФОТО
+@router.message(StateFilter(UserStates.waiting_for_photo))
+async def ignore_text_during_photo(message: Message):
+    """Игнорирование текстовых сообщений при ожидании фото"""
+    await message.answer("Пожалуйста, отправьте фото книги, а не текстовое сообщение.")
 
 # ОБРАБОТЧИК КНОПКИ "ЗАБРОНИРОВАТЬ" ПОСЛЕ УСПЕШНОГО БРОНИРОВАНИЯ
 @router.callback_query(F.data == "action_book")
@@ -852,8 +751,13 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
 async def main():
     """Основная функция запуска бота"""
     try:
+        # Инициализация базы данных
         init_db()
+        
+        # Запускаем фоновую задачу для напоминаний
         asyncio.create_task(check_reminders())
+        
+        # Запускаем бота
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
