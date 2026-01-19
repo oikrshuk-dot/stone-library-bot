@@ -12,13 +12,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 import time
 import threading
+import os
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота и ID группы
-BOT_TOKEN = "8586664266:AAGeqvtRQffbiyAwfH-bRa0uxd-DskU6nAU"
-GROUP_CHAT_ID = -5126633040
+# Токен бота и ID группы (берутся из переменных окружения)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID"))
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+if not GROUP_CHAT_ID:
+    raise ValueError("GROUP_CHAT_ID не установлен в переменных окружения")
 
 # Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
@@ -74,25 +80,6 @@ def close_db_connection():
                 pass
             conn_cache = None
 
-def safe_db_operation(func):
-    """Декоратор для безопасных операций с базой данных"""
-    def wrapper(*args, **kwargs):
-        for attempt in range(5):
-            try:
-                with db_lock:
-                    result = func(*args, **kwargs)
-                    return result
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e) and attempt < 4:
-                    logging.warning(f"Operation locked, retry {attempt + 1}/5")
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise
-            except Exception as e:
-                logging.error(f"Database error in {func.__name__}: {e}")
-                raise
-    return wrapper
-
 # Состояния FSM
 class UserStates(StatesGroup):
     waiting_for_name = State()
@@ -103,12 +90,11 @@ class UserStates(StatesGroup):
     waiting_for_photo = State()
 
 # Инициализация базы данных
-@safe_db_operation
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Таблица пользователей
+    # Таблица пользователей (обновлённая версия с telegram_id)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -119,7 +105,8 @@ def init_db():
         booking_start TEXT,
         booking_duration TEXT,
         booking_end TEXT,
-        status TEXT DEFAULT 'available'
+        status TEXT DEFAULT 'available',
+        telegram_id INTEGER UNIQUE NOT NULL
     )
     ''')
     
@@ -171,38 +158,38 @@ def init_db():
         ''', books_data)
     
     conn.commit()
+    conn.close()
     logging.info("База данных инициализирована")
 
 # Получение книг по офису
-@safe_db_operation
 def get_books_by_office(office):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
     books = cursor.fetchall()
+    conn.close()
     return books
 
 # Проверка существования книги в офисе
-@safe_db_operation
 def book_exists_in_office(title, office):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
                   (title.lower(), office))
     result = cursor.fetchone()
+    conn.close()
     return result
 
 # Обновление статуса книги
-@safe_db_operation
 def update_book_status(title, office, status):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
                   (status, title.lower(), office))
     conn.commit()
+    conn.close()
 
 # Создание бронирования
-@safe_db_operation
 def create_booking(user_id, book_title, office, duration):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -237,10 +224,10 @@ def create_booking(user_id, book_title, office, duration):
     
     booking_id = cursor.lastrowid
     conn.commit()
+    conn.close()
     return booking_id, end_time
 
 # Получение информации о бронировании пользователя
-@safe_db_operation
 def get_user_booking(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -249,10 +236,10 @@ def get_user_booking(user_id):
     FROM users WHERE user_id = ? AND status = 'booked'
     ''', (user_id,))
     result = cursor.fetchone()
+    conn.close()
     return result
 
 # Завершение бронирования
-@safe_db_operation
 def complete_booking(user_id, book_title, office):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -274,33 +261,44 @@ def complete_booking(user_id, book_title, office):
     ''', (user_id, book_title))
     
     conn.commit()
+    conn.close()
 
-# Регистрация нового пользователя
-@safe_db_operation
-def register_user(user_id, first_name, last_name):
+# Регистрация нового пользователя с Telegram ID
+def register_user(user_id, first_name, last_name, telegram_id):
+    """Регистрация или обновление пользователя с сохранением Telegram ID"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''
-    INSERT OR REPLACE INTO users (user_id, first_name, last_name, status)
-    VALUES (?, ?, ?, 'available')
-    ''', (user_id, first_name, last_name))
+    INSERT OR REPLACE INTO users 
+    (user_id, first_name, last_name, status, telegram_id) 
+    VALUES (?, ?, ?, 'available', ?)
+    ''', (user_id, first_name, last_name, telegram_id))
     conn.commit()
+    conn.close()
 
 # Обновление офиса пользователя
-@safe_db_operation
-def update_user_office(user_id, office):
+def update_user_office(telegram_id, office):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('UPDATE users SET office = ? WHERE user_id = ?', (office, user_id))
+    cursor.execute('''
+    UPDATE users SET office = ? 
+    WHERE telegram_id = ?
+    ''', (office, telegram_id))
     conn.commit()
+    conn.close()
 
-# Получение информации о пользователе
-@safe_db_operation
-def get_user_info(user_id):
+# Получение информации о пользователе по Telegram ID
+def get_user_info(telegram_id):
+    """Получение информации о пользователе по Telegram ID"""
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT first_name, last_name, office FROM users WHERE user_id = ?', (user_id,))
+    cursor.execute('''
+    SELECT first_name, last_name, office 
+    FROM users 
+    WHERE telegram_id = ?
+    ''', (telegram_id,))
     result = cursor.fetchone()
+    conn.close()
     return result
 
 # Формирование списка книг для сообщения
@@ -375,90 +373,6 @@ async def safe_edit_message(message, text, reply_markup=None):
         else:
             raise
 
-# Фоновая задача для проверки напоминаний
-async def check_reminders():
-    while True:
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # Получаем всех пользователей с активными бронированиями
-            cursor.execute('''
-            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name, office
-            FROM users 
-            WHERE status = 'booked' AND booking_end IS NOT NULL
-            ''')
-            
-            users = cursor.fetchall()
-            current_time = datetime.now()
-            
-            for user in users:
-                user_id, book_title, booking_start_str, duration, booking_end_str, first_name, office = user
-                
-                if not booking_start_str or not booking_end_str:
-                    continue
-                
-                booking_start = datetime.fromisoformat(booking_start_str)
-                booking_end = datetime.fromisoformat(booking_end_str)
-                
-                # Проверяем напоминания для разных сроков
-                if duration == "1 час":
-                    # Напоминание за 15 минут до окончания
-                    reminder_time = booking_end - timedelta(minutes=15)
-                    if current_time >= reminder_time and current_time < booking_end:
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"*Не забудь вернуть книгу '{book_title}' через 15 минут*",
-                                parse_mode="Markdown",
-                                reply_markup=get_booking_keyboard(book_title)
-                            )
-                        except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания: {e}")
-                    
-                    # Напоминание об окончании брони
-                    if current_time >= booking_end:
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
-                                reply_markup=get_booking_keyboard(book_title)
-                            )
-                        except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания об окончании: {e}")
-                
-                elif duration == "1 неделя":
-                    # Напоминание за день до окончания (5-й день)
-                    day_5 = booking_start + timedelta(days=5)
-                    if current_time.date() == day_5.date() and current_time.hour == 9:  # В 9 утра 5-го дня
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"Не забудь вернуть книгу '{book_title}' завтра",
-                                reply_markup=get_booking_keyboard(book_title)
-                            )
-                        except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания за день: {e}")
-                
-                elif duration == "1 месяц":
-                    # Напоминание за неделю до окончания
-                    week_3_end = booking_start + timedelta(weeks=3)
-                    if current_time.date() == week_3_end.date() and current_time.hour == 9:
-                        try:
-                            await bot.send_message(
-                                user_id,
-                                f"Не забудь вернуть книгу '{book_title}' через неделю"
-                            )
-                        except Exception as e:
-                            logging.error(f"Ошибка отправки напоминания за неделю: {e}")
-        
-            conn.close()
-        except Exception as e:
-            logging.error(f"Ошибка при проверке напоминаний: {e}")
-        
-        # Проверяем каждые 5 минут
-        await asyncio.sleep(300)
-
 # Обработчики
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -485,8 +399,8 @@ async def process_name(message: Message, state: FSMContext):
     first_name = name_parts[0]
     last_name = " ".join(name_parts[1:])
     
-    # Регистрируем пользователя
-    register_user(message.from_user.id, first_name, last_name)
+    # Регистрируем пользователя с Telegram ID
+    register_user(message.from_user.id, first_name, last_name, message.from_user.id)
     
     await state.update_data(first_name=first_name, last_name=last_name)
     await message.answer(
@@ -515,7 +429,7 @@ async def process_office(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Неверный выбор офиса")
         return
     
-    # Обновляем офис пользователя
+    # Обновляем офис пользователя с сохранением Telegram ID
     update_user_office(callback.from_user.id, office)
     await state.update_data(office=office)
     
@@ -655,13 +569,14 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             callback.from_user.id, book_title, office, duration
         )
         
-        # Отправляем уведомление в группу
+        # Отправляем уведомление в группу с Telegram ID
         user_info = get_user_info(callback.from_user.id)
         if user_info:
             _, last_name, _ = user_info
             await bot.send_message(
                 GROUP_CHAT_ID,
-                f"Пользователь {first_name} {last_name} забронировал книгу '{book_title}' на срок {duration}"
+                f"Пользователь {first_name} {last_name} (ID: {callback.from_user.id}) "
+                f"забронировал книгу '{book_title}' на срок {duration}"
             )
         
         await safe_edit_message(
@@ -679,12 +594,96 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
     
     await state.clear()
 
+# Фоновая задача для проверки напоминаний
+async def check_reminders():
+    while True:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Получаем всех пользователей с активными бронированиями
+            cursor.execute('''
+            SELECT user_id, current_book, booking_start, booking_duration, booking_end, first_name, office
+            FROM users 
+            WHERE status = 'booked' AND booking_end IS NOT NULL
+            ''')
+            
+            users = cursor.fetchall()
+            current_time = datetime.now()
+            
+            for user in users:
+                user_id, book_title, booking_start_str, duration, booking_end_str, first_name, office = user
+                
+                if not booking_start_str or not booking_end_str:
+                    continue
+                
+                booking_start = datetime.fromisoformat(booking_start_str)
+                booking_end = datetime.fromisoformat(booking_end_str)
+                
+                # Проверяем напоминания для разных сроков
+                if duration == "1 час":
+                    # Напоминание за 15 минут до окончания
+                    reminder_time = booking_end - timedelta(minutes=15)
+                    if current_time >= reminder_time and current_time < booking_end:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"*Не забудь вернуть книгу '{book_title}' через 15 минут*",
+                                parse_mode="Markdown",
+                                reply_markup=get_booking_keyboard(book_title)
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки напоминания: {e}")
+                    
+                    # Напоминание об окончании брони
+                    if current_time >= booking_end:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
+                                reply_markup=get_booking_keyboard(book_title)
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки напоминания об окончании: {e}")
+                
+                elif duration == "1 неделя":
+                    # Напоминание за день до окончания (5-й день)
+                    day_5 = booking_start + timedelta(days=5)
+                    if current_time.date() == day_5.date() and current_time.hour == 9:  # В 9 утра 5-го дня
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"Не забудь вернуть книгу '{book_title}' завтра",
+                                reply_markup=get_booking_keyboard(book_title)
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки напоминания за день: {e}")
+                
+                elif duration == "1 месяц":
+                    # Напоминание за неделю до окончания
+                    week_3_end = booking_start + timedelta(weeks=3)
+                    if current_time.date() == week_3_end.date() and current_time.hour == 9:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"Не забудь вернуть книгу '{book_title}' через неделю"
+                            )
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки напоминания за неделю: {e}")
+        
+            conn.close()
+        except Exception as e:
+            logging.error(f"Ошибка при проверке напоминаний: {e}")
+        
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
+
 # Обработчик кнопки возврата книги
 @router.callback_query(F.data.startswith("return_"))
 async def process_return_book(callback: CallbackQuery, state: FSMContext):
     book_title = callback.data.replace("return_", "")
     
-    # Получаем информацию о пользователе
+    # Получаем информацию о пользователе по Telegram ID
     user_info = get_user_info(callback.from_user.id)
     if not user_info:
         await callback.answer("Ошибка: пользователь не найден")
@@ -715,12 +714,13 @@ async def process_return_photo(message: Message, state: FSMContext):
     try:
         complete_booking(message.from_user.id, book_title, office)
         
-        # Отправляем уведомление в группу с фото
+        # Отправляем уведомление в группу с фото и Telegram ID
         photo = message.photo[-1]
         await bot.send_photo(
             GROUP_CHAT_ID,
             photo.file_id,
-            caption=f"Пользователь {first_name} {last_name} вернул книгу '{book_title}'"
+            caption=f"Пользователь {first_name} {last_name} (ID: {message.from_user.id}) "
+                    f"вернул книгу '{book_title}'"
         )
         
         await message.answer(
@@ -744,7 +744,7 @@ async def ignore_text_during_photo(message: Message):
 # Обработчик для кнопки "Забронировать" в состоянии без FSM (после успешного бронирования)
 @router.callback_query(F.data == "action_book")
 async def process_action_book_any_state(callback: CallbackQuery, state: FSMContext):
-    # Получаем информацию о пользователе из базы данных
+    # Получаем информацию о пользователе по Telegram ID
     user_info = get_user_info(callback.from_user.id)
     
     if not user_info:
@@ -799,5 +799,4 @@ async def main():
         close_db_connection()
 
 if __name__ == "__main__":
-
     asyncio.run(main())
