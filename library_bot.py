@@ -14,7 +14,7 @@ import os
 import time
 import threading
 
-# Настройка логирования - ИСПОЛЬЗУЕМ ТОЛЬКО logging
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Токен бота и ID группы (безопасное получение)
@@ -23,12 +23,10 @@ GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 
 if not BOT_TOKEN:
     logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
-    logging.error("👉 Решение: Зайди в Railway → Variables и добавь BOT_TOKEN")
     exit(1)
 
 if not GROUP_CHAT_ID_STR:
     logging.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
-    logging.error("👉 Решение: Зайди в Railway → Variables и добавь GROUP_CHAT_ID")
     exit(1)
 
 try:
@@ -46,21 +44,38 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-# ГЛОБАЛЬНЫЙ ИСПРАВЛЕННЫЙ МЕТОД ДЛЯ БАЗЫ ДАННЫХ
+# ГЛОБАЛЬНАЯ БЛОКИРОВКА ДЛЯ БАЗЫ ДАННЫХ
+db_lock = threading.Lock()
+
+# ИСПРАВЛЕННЫЙ МЕТОД ПОДКЛЮЧЕНИЯ К БАЗЕ
 def get_db_connection():
-    """Надёжное получение соединения с базой данных"""
-    try:
-        # Всегда создаём НОВОЕ соединение (без кэширования!)
-        conn = sqlite3.connect(
-            'library.db',
-            check_same_thread=False,
-            timeout=30
-        )
-        conn.row_factory = sqlite3.Row
-        return conn
-    except sqlite3.Error as e:
-        logging.error(f"❌ Ошибка подключения к базе данных: {e}")
-        raise
+    """Надёжное подключение к базе данных с повторными попытками и блокировками"""
+    for attempt in range(10):  # Даём 10 попыток
+        try:
+            # Захватываем глобальную блокировку
+            db_lock.acquire()
+            
+            # Создаём соединение
+            conn = sqlite3.connect(
+                'library.db',
+                check_same_thread=False,
+                timeout=30  # Таймаут 30 секунд
+            )
+            conn.row_factory = sqlite3.Row
+            return conn
+            
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < 9:
+                logging.warning(f"🔒 База данных заблокирована, попытка {attempt + 1}/10...")
+                time.sleep(1 * (attempt + 1))  # Экспоненциальная задержка
+                continue
+            raise
+        finally:
+            # Если не удалось создать соединение, освобождаем блокировку
+            if 'conn' not in locals() or conn is None:
+                db_lock.release()
+    
+    raise sqlite3.OperationalError("❌ Не удалось подключиться к базе данных после 10 попыток")
 
 # Состояния FSM
 class UserStates(StatesGroup):
@@ -71,7 +86,7 @@ class UserStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_photo = State()
 
-# Инициализация базы данных
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ (ИСПРАВЛЕННАЯ)
 def init_db():
     """Создание таблиц и первоначальное заполнение книгами"""
     conn = None
@@ -79,7 +94,7 @@ def init_db():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Таблица пользователей (обновлённая версия с telegram_id)
+        # Таблица пользователей
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -121,18 +136,15 @@ def init_db():
         )
         ''')
         
-        # Добавление книг в базу данных только если их нет
+        # Добавление книг только если их нет
         cursor.execute('SELECT COUNT(*) as count FROM books')
         if cursor.fetchone()['count'] == 0:
             books_data = [
-                # Stone Towers
                 ("книга а", "автор А", "Stone Towers"),
                 ("книга в", "автор В", "Stone Towers"),
                 ("книга с", "автор С", "Stone Towers"),
-                # Manhatten
                 ("книга d", "автор D", "Manhatten"),
                 ("книга е", "автор E", "Manhatten"),
-                # Известия
                 ("книга x", "автор Х", "Известия"),
                 ("книга z", "автор Z", "Известия"),
                 ("книга y", "автор У", "Известия")
@@ -150,6 +162,7 @@ def init_db():
     finally:
         if conn:
             conn.close()
+            db_lock.release()
 
 # Получение книг по офису
 def get_books_by_office(office):
@@ -196,6 +209,13 @@ def update_book_status(title, office, status):
         cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
                       (status, title.lower(), office))
         conn.commit()
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            logging.warning("🔒 База данных заблокирована в update_book_status, повторная попытка...")
+            time.sleep(1)
+            update_book_status(title, office, status)
+        else:
+            raise
     except Exception as e:
         logging.error(f"❌ Ошибка в update_book_status: {e}")
         raise
@@ -242,6 +262,12 @@ def create_booking(user_id, book_title, office, duration):
         booking_id = cursor.lastrowid
         conn.commit()
         return booking_id, end_time
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            logging.warning("🔒 База данных заблокирована в create_booking, повторная попытка...")
+            time.sleep(1)
+            return create_booking(user_id, book_title, office, duration)
+        raise
     except Exception as e:
         logging.error(f"❌ Ошибка в create_booking: {e}")
         raise
