@@ -21,17 +21,19 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID_STR = os.getenv("GROUP_CHAT_ID")
 
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не установлен в Railway Variables!")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: BOT_TOKEN не установлен в Railway Variables!")
+    logger.error("👉 Решение: Зайди в Railway → Variables и добавь BOT_TOKEN")
     exit(1)
 
 if not GROUP_CHAT_ID_STR:
-    logger.error("❌ GROUP_CHAT_ID не установлен в Railway Variables!")
+    logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: GROUP_CHAT_ID не установлен в Railway Variables!")
+    logger.error("👉 Решение: Зайди в Railway → Variables и добавь GROUP_CHAT_ID")
     exit(1)
 
 try:
     GROUP_CHAT_ID = int(GROUP_CHAT_ID_STR)
 except ValueError:
-    logger.error(f"❌ GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
+    logger.error(f"❌ ОШИБКА: GROUP_CHAT_ID должен быть числом! Сейчас: '{GROUP_CHAT_ID_STR}'")
     exit(1)
 
 logger.info(f"✅ Переменные загружены! GROUP_CHAT_ID: {GROUP_CHAT_ID}")
@@ -52,7 +54,81 @@ class UserStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_photo = State()
 
-# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ (простое подключение к файлу в корне)
+# ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
+def init_db():
+    """Создание таблиц и первоначальное заполнение книгами"""
+    conn = sqlite3.connect('library.db', check_same_thread=False)
+    cursor = conn.cursor()
+    
+    logger.info("🛠️ Инициализация базы данных...")
+    
+    # Таблица пользователей
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        first_name TEXT,
+        last_name TEXT,
+        office TEXT,
+        current_book TEXT,
+        booking_start TEXT,
+        booking_duration TEXT,
+        booking_end TEXT,
+        status TEXT DEFAULT 'available',
+        telegram_id INTEGER UNIQUE NOT NULL
+    )
+    ''')
+    
+    # Таблица книг
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS books (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        author TEXT,
+        office TEXT,
+        status TEXT DEFAULT 'available'
+    )
+    ''')
+    
+    # Таблица бронирований
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        book_title TEXT,
+        office TEXT,
+        start_time TEXT,
+        duration TEXT,
+        end_time TEXT,
+        status TEXT DEFAULT 'active',
+        FOREIGN KEY (user_id) REFERENCES users (user_id)
+    )
+    ''')
+    
+    # Добавление книг только если их нет
+    cursor.execute('SELECT COUNT(*) FROM books')
+    if cursor.fetchone()[0] == 0:
+        logger.info("📚 Добавление книг в базу данных...")
+        books_data = [
+            ("книга а", "автор А", "Stone Towers"),
+            ("книга в", "автор В", "Stone Towers"),
+            ("книга с", "автор С", "Stone Towers"),
+            ("книга d", "автор D", "Manhatten"),
+            ("книга е", "автор E", "Manhatten"),
+            ("книга x", "автор Х", "Известия"),
+            ("книга z", "автор Z", "Известия"),
+            ("книга y", "автор У", "Известия")
+        ]
+        
+        cursor.executemany('''
+        INSERT INTO books (title, author, office) VALUES (?, ?, ?)
+        ''', books_data)
+        logger.info(f"✅ Добавлено {len(books_data)} книг в базу данных")
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ База данных успешно инициализирована")
+
+# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
 def get_db_connection():
     """Подключение к базе данных из файла в корне проекта"""
     return sqlite3.connect('library.db', check_same_thread=False)
@@ -517,6 +593,9 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
         )
     
     await state.clear()
+    
+    # Перезапускаем проверку напоминаний
+    asyncio.create_task(check_reminders())
 
 # ФОНОВАЯ ЗАДАЧА ДЛЯ НАПОМИНАНИЙ
 async def check_reminders():
@@ -541,10 +620,15 @@ async def check_reminders():
                 if not booking_start_str or not booking_end_str:
                     continue
                 
-                booking_start = datetime.fromisoformat(booking_start_str)
-                booking_end = datetime.fromisoformat(booking_end_str)
+                try:
+                    booking_start = datetime.fromisoformat(booking_start_str)
+                    booking_end = datetime.fromisoformat(booking_end_str)
+                except ValueError:
+                    continue
                 
+                # Проверяем напоминания для разных сроков
                 if duration == "1 час":
+                    # Напоминание за 15 минут до окончания
                     reminder_time = booking_end - timedelta(minutes=15)
                     if current_time >= reminder_time and current_time < booking_end:
                         try:
@@ -557,6 +641,7 @@ async def check_reminders():
                         except Exception as e:
                             logger.error(f"❌ Ошибка отправки напоминания: {e}")
                     
+                    # Напоминание об окончании брони
                     if current_time >= booking_end:
                         try:
                             await bot.send_message(
@@ -566,12 +651,38 @@ async def check_reminders():
                             )
                         except Exception as e:
                             logger.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
-            
+                
+                elif duration == "1 неделя":
+                    # Напоминание за день до окончания (5-й день)
+                    day_5 = booking_start + timedelta(days=5)
+                    if current_time.date() == day_5.date() and current_time.hour == 9:  # В 9 утра 5-го дня
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"Не забудь вернуть книгу '{book_title}' завтра",
+                                reply_markup=get_booking_keyboard(book_title)
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка отправки напоминания за день: {e}")
+                
+                elif duration == "1 месяц":
+                    # Напоминание за неделю до окончания
+                    week_3_end = booking_start + timedelta(weeks=3)
+                    if current_time.date() == week_3_end.date() and current_time.hour == 9:
+                        try:
+                            await bot.send_message(
+                                user_id,
+                                f"Не забудь вернуть книгу '{book_title}' через неделю"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка отправки напоминания за неделю: {e}")
+        
             conn.close()
         except Exception as e:
             logger.error(f"❌ Ошибка при проверке напоминаний: {e}")
         
-        await asyncio.sleep(300)
+        # Проверяем каждые 2 минуты (для тестирования)
+        await asyncio.sleep(120)
 
 # ОБРАБОТЧИКИ ВОЗВРАТА КНИГИ
 @router.callback_query(F.data.startswith("return_"))
@@ -677,14 +788,19 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
 async def main():
     """Основная функция запуска бота"""
     try:
+        # ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ПЕРЕД ЗАПУСКОМ!
+        init_db()
+        
         # Запускаем фоновую задачу для напоминаний
         asyncio.create_task(check_reminders())
         
-        # Запускаем бота (база данных уже существует в файле)
+        # Запускаем бота
+        logger.info("🚀 Запуск бота...")
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
         raise
 
 if __name__ == "__main__":
+    logger.info("✅ Старт приложения")
     asyncio.run(main())
