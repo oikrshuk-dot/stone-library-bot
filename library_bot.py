@@ -11,6 +11,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 import os
+import time
+import threading
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -45,6 +47,39 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
+# ГЛОБАЛЬНАЯ БЛОКИРОВКА ДЛЯ БАЗЫ ДАННЫХ
+db_lock = threading.Lock()
+
+# НАДЁЖНОЕ ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
+def get_db_connection():
+    """Надёжное подключение к базе данных с повторными попытками и блокировками"""
+    for attempt in range(5):  # Даём 5 попыток
+        try:
+            # Захватываем глобальную блокировку
+            db_lock.acquire()
+            
+            # Создаём соединение
+            conn = sqlite3.connect(
+                'library.db',
+                check_same_thread=False,
+                timeout=30  # Таймаут 30 секунд
+            )
+            conn.row_factory = sqlite3.Row
+            return conn
+            
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower() and attempt < 4:
+                logger.warning(f"🔒 База данных заблокирована, попытка {attempt + 1}/5...")
+                time.sleep(1 * (attempt + 1))  # Экспоненциальная задержка
+                continue
+            raise
+        finally:
+            # Если не удалось создать соединение, освобождаем блокировку
+            if 'conn' not in locals() or conn is None:
+                db_lock.release()
+    
+    raise sqlite3.OperationalError("❌ Не удалось подключиться к базе данных после 5 попыток")
+
 # СОСТОЯНИЯ FSM
 class UserStates(StatesGroup):
     waiting_for_name = State()
@@ -54,227 +89,313 @@ class UserStates(StatesGroup):
     waiting_for_duration = State()
     waiting_for_photo = State()
 
-# ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
-def get_db_connection():
-    """Простое подключение к базе данных"""
-    return sqlite3.connect('library.db', check_same_thread=False)
-
 # ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 def init_db():
     """Создание таблиц и первоначальное заполнение книгами"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Таблица пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        first_name TEXT,
-        last_name TEXT,
-        office TEXT,
-        current_book TEXT,
-        booking_start TEXT,
-        booking_duration TEXT,
-        booking_end TEXT,
-        status TEXT DEFAULT 'available',
-        telegram_id INTEGER UNIQUE NOT NULL
-    )
-    ''')
-    
-    # Таблица книг
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        author TEXT,
-        office TEXT,
-        status TEXT DEFAULT 'available'
-    )
-    ''')
-    
-    # Таблица бронирований
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS bookings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        book_title TEXT,
-        office TEXT,
-        start_time TEXT,
-        duration TEXT,
-        end_time TEXT,
-        status TEXT DEFAULT 'active',
-        FOREIGN KEY (user_id) REFERENCES users (user_id)
-    )
-    ''')
-    
-    # Добавление книг только если их нет (ИСПРАВЛЕНО)
-    cursor.execute('SELECT COUNT(*) FROM books')
-    if cursor.fetchone()[0] == 0:
-        books_data = [
-            ("книга а", "автор А", "Stone Towers"),
-            ("книга в", "автор В", "Stone Towers"),
-            ("книга с", "автор С", "Stone Towers"),
-            ("книга d", "автор D", "Manhatten"),
-            ("книга е", "автор E", "Manhatten"),
-            ("книга x", "автор Х", "Известия"),
-            ("книга z", "автор Z", "Известия"),
-            ("книга y", "автор У", "Известия")
-        ]
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
         
-        cursor.executemany('''
-        INSERT INTO books (title, author, office) VALUES (?, ?, ?)
-        ''', books_data)
-    
-    conn.commit()
-    conn.close()
-    logger.info("✅ База данных успешно инициализирована")
+        # Таблица пользователей
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_name TEXT,
+            last_name TEXT,
+            office TEXT,
+            current_book TEXT,
+            booking_start TEXT,
+            booking_duration TEXT,
+            booking_end TEXT,
+            status TEXT DEFAULT 'available',
+            telegram_id INTEGER UNIQUE NOT NULL
+        )
+        ''')
+        
+        # Таблица книг
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            author TEXT,
+            office TEXT,
+            status TEXT DEFAULT 'available'
+        )
+        ''')
+        
+        # Таблица бронирований
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            book_title TEXT,
+            office TEXT,
+            start_time TEXT,
+            duration TEXT,
+            end_time TEXT,
+            status TEXT DEFAULT 'active',
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+        ''')
+        
+        # Добавление книг только если их нет (ИСПРАВЛЕНО)
+        cursor.execute('SELECT COUNT(*) FROM books')
+        if cursor.fetchone()[0] == 0:
+            books_data = [
+                ("книга а", "автор А", "Stone Towers"),
+                ("книга в", "автор В", "Stone Towers"),
+                ("книга с", "автор С", "Stone Towers"),
+                ("книга d", "автор D", "Manhatten"),
+                ("книга е", "автор E", "Manhatten"),
+                ("книга x", "автор Х", "Известия"),
+                ("книга z", "автор Z", "Известия"),
+                ("книга y", "автор У", "Известия")
+            ]
+            
+            cursor.executemany('''
+            INSERT INTO books (title, author, office) VALUES (?, ?, ?)
+            ''', books_data)
+        
+        conn.commit()
+        logger.info("✅ База данных успешно инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка при инициализации базы данных: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ПОЛУЧЕНИЕ КНИГ ПО ОФИСУ
 def get_books_by_office(office):
     """Получение списка доступных книг в указанном офисе"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
-    books = cursor.fetchall()
-    conn.close()
-    return books
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, author FROM books WHERE office = ? AND status = "available"', (office,))
+        books = cursor.fetchall()
+        return books
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_books_by_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ПРОВЕРКА СУЩЕСТВОВАНИЯ КНИГИ В ОФИСЕ
 def book_exists_in_office(title, office):
     """Проверка, существует ли книга в указанном офисе"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
-                  (title.lower(), office))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, author FROM books WHERE LOWER(title) = ? AND office = ? AND status = "available"', 
+                      (title.lower(), office))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в book_exists_in_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ОБНОВЛЕНИЕ СТАТУСА КНИГИ
 def update_book_status(title, office, status):
     """Обновление статуса книги в базе данных"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
-                  (status, title.lower(), office))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE books SET status = ? WHERE LOWER(title) = ? AND office = ?', 
+                      (status, title.lower(), office))
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            logger.warning("🔒 База данных заблокирована в update_book_status, повторная попытка...")
+            time.sleep(1)
+            update_book_status(title, office, status)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в update_book_status: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # СОЗДАНИЕ БРОНИРОВАНИЯ
 def create_booking(user_id, book_title, office, duration):
     """Создание нового бронирования книги"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Получаем текущее время
-    start_time = datetime.now()
-    
-    # Рассчитываем время окончания
-    if duration == "1 час":
-        end_time = start_time + timedelta(hours=1)
-    elif duration == "1 день":
-        end_time = start_time + timedelta(days=1)
-    elif duration == "1 неделя":
-        end_time = start_time + timedelta(weeks=1)
-    elif duration == "1 месяц":
-        end_time = start_time + timedelta(days=30)
-    
-    # Создаем запись о бронировании
-    cursor.execute('''
-    INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
-    
-    # Обновляем статус книги
-    update_book_status(book_title, office, "booked")
-    
-    # Обновляем информацию о пользователе
-    cursor.execute('''
-    UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
-    WHERE user_id = ?
-    ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
-    
-    booking_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return booking_id, end_time
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Получаем текущее время
+        start_time = datetime.now()
+        
+        # Рассчитываем время окончания
+        if duration == "1 час":
+            end_time = start_time + timedelta(hours=1)
+        elif duration == "1 день":
+            end_time = start_time + timedelta(days=1)
+        elif duration == "1 неделя":
+            end_time = start_time + timedelta(weeks=1)
+        elif duration == "1 месяц":
+            end_time = start_time + timedelta(days=30)
+        
+        # Создаем запись о бронировании
+        cursor.execute('''
+        INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, book_title, office, start_time.isoformat(), duration, end_time.isoformat()))
+        
+        # Обновляем статус книги
+        update_book_status(book_title, office, "booked")
+        
+        # Обновляем информацию о пользователе
+        cursor.execute('''
+        UPDATE users SET current_book = ?, booking_start = ?, booking_duration = ?, booking_end = ?, status = 'booked'
+        WHERE user_id = ?
+        ''', (book_title, start_time.isoformat(), duration, end_time.isoformat(), user_id))
+        
+        booking_id = cursor.lastrowid
+        conn.commit()
+        return booking_id, end_time
+    except sqlite3.OperationalError as e:
+        if "database is locked" in str(e).lower():
+            logger.warning("🔒 База данных заблокирована в create_booking, повторная попытка...")
+            time.sleep(1)
+            return create_booking(user_id, book_title, office, duration)
+        raise
+    except Exception as e:
+        logger.error(f"❌ Ошибка в create_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ПОЛУЧЕНИЕ ИНФОРМАЦИИ О БРОНИРОВАНИИ ПОЛЬЗОВАТЕЛЯ
 def get_user_booking(user_id):
     """Получение информации о текущем бронировании пользователя"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT current_book, booking_start, booking_duration, booking_end 
-    FROM users WHERE user_id = ? AND status = 'booked'
-    ''', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT current_book, booking_start, booking_duration, booking_end 
+        FROM users WHERE user_id = ? AND status = 'booked'
+        ''', (user_id,))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_user_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ЗАВЕРШЕНИЕ БРОНИРОВАНИЯ
 def complete_booking(user_id, book_title, office):
     """Завершение бронирования и возврат книги"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Обновляем статус книги
-    update_book_status(book_title, office, "available")
-    
-    # Обновляем статус пользователя
-    cursor.execute('''
-    UPDATE users SET current_book = NULL, booking_start = NULL, 
-    booking_duration = NULL, booking_end = NULL, status = 'available'
-    WHERE user_id = ?
-    ''', (user_id,))
-    
-    # Обновляем статус бронирования
-    cursor.execute('''
-    UPDATE bookings SET status = 'completed' 
-    WHERE user_id = ? AND book_title = ? AND status = 'active'
-    ''', (user_id, book_title))
-    
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Обновляем статус книги
+        update_book_status(book_title, office, "available")
+        
+        # Обновляем статус пользователя
+        cursor.execute('''
+        UPDATE users SET current_book = NULL, booking_start = NULL, 
+        booking_duration = NULL, booking_end = NULL, status = 'available'
+        WHERE user_id = ?
+        ''', (user_id,))
+        
+        # Обновляем статус бронирования
+        cursor.execute('''
+        UPDATE bookings SET status = 'completed' 
+        WHERE user_id = ? AND book_title = ? AND status = 'active'
+        ''', (user_id, book_title))
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в complete_booking: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ С TELEGRAM ID
 def register_user(user_id, first_name, last_name, telegram_id):
     """Регистрация или обновление пользователя с сохранением Telegram ID"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT OR REPLACE INTO users 
-    (user_id, first_name, last_name, status, telegram_id) 
-    VALUES (?, ?, ?, 'available', ?)
-    ''', (user_id, first_name, last_name, telegram_id))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (user_id, first_name, last_name, status, telegram_id) 
+        VALUES (?, ?, ?, 'available', ?)
+        ''', (user_id, first_name, last_name, telegram_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в register_user: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ОБНОВЛЕНИЕ ОФИСА ПОЛЬЗОВАТЕЛЯ
 def update_user_office(telegram_id, office):
     """Обновление офиса пользователя по его Telegram ID"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    UPDATE users SET office = ? 
-    WHERE telegram_id = ?
-    ''', (office, telegram_id))
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users SET office = ? 
+        WHERE telegram_id = ?
+        ''', (office, telegram_id))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка в update_user_office: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ПОЛУЧЕНИЕ ИНФОРМАЦИИ О ПОЛЬЗОВАТЕЛЕ
 def get_user_info(telegram_id):
     """Получение информации о пользователе по Telegram ID"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT first_name, last_name, office 
-    FROM users 
-    WHERE telegram_id = ?
-    ''', (telegram_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT first_name, last_name, office 
+        FROM users 
+        WHERE telegram_id = ?
+        ''', (telegram_id,))
+        result = cursor.fetchone()
+        return result
+    except Exception as e:
+        logger.error(f"❌ Ошибка в get_user_info: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+            db_lock.release()
 
 # ФОРМАТИРОВАНИЕ СПИСКА КНИГ
 def format_books_list(books):
@@ -642,8 +763,12 @@ async def check_reminders():
                             logger.error(f"❌ Ошибка отправки напоминания об окончании: {e}")
             
             conn.close()
+            db_lock.release()
         except Exception as e:
             logger.error(f"❌ Ошибка при проверке напоминаний: {e}")
+            if 'conn' in locals() and conn:
+                conn.close()
+                db_lock.release()
         
         await asyncio.sleep(300)
 
