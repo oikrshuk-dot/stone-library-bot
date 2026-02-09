@@ -2,7 +2,7 @@ import logging
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup
@@ -83,6 +83,7 @@ class UserStates(StatesGroup):
     waiting_for_confirmation = State()
     waiting_for_duration = State()
     waiting_for_photo = State()
+    waiting_for_waitlist_choice = State()
 
 # Инициализация базы данных
 async def init_db():
@@ -131,6 +132,19 @@ async def init_db():
         )
         ''')
         
+        # Таблица листа ожидания
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS waiting_list (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(user_id),
+            book_title TEXT NOT NULL,
+            office TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notified BOOLEAN DEFAULT FALSE,
+            CONSTRAINT unique_waiting_entry UNIQUE (user_id, book_title, office)
+        )
+        ''')
+        
         # Проверяем, есть ли книги в базе
         count = await conn.fetchval('SELECT COUNT(*) FROM books')
         if count == 0:
@@ -174,8 +188,8 @@ async def book_exists_in_office(title: str, office: str):
     """Проверка наличия книги в указанном офисе"""
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            'SELECT title, author FROM books WHERE LOWER(title) = LOWER($1) AND office = $2 AND status = $3',
-            title, office, 'available'
+            'SELECT title, author, status FROM books WHERE LOWER(title) = LOWER($1) AND office = $2',
+            title, office
         )
         return row
 
@@ -209,6 +223,9 @@ async def create_booking(user_id: int, book_title: str, office: str, duration: s
         async with conn.transaction():
             # Обновляем статус книги
             await update_book_status(book_title, office, "booked")
+            
+            # Удаляем пользователя из листа ожидания для этой книги
+            await remove_from_waiting_list(user_id, book_title, office)
             
             # Создаем запись о бронировании
             booking_id = await conn.fetchval(
@@ -275,6 +292,9 @@ async def complete_booking(user_id: int, book_title: str, office: str):
                 ''',
                 user_id, book_title
             )
+            
+            # Уведомляем первого в листе ожидания
+            await notify_next_in_waiting_list(book_title, office)
 
 # Регистрация нового пользователя
 async def register_user(user_id: int, first_name: str, last_name: str):
@@ -304,10 +324,95 @@ async def get_user_info(user_id: int):
     """Получение информации о пользователе"""
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            'SELECT first_name, last_name, office FROM users WHERE user_id = $1',
+            'SELECT first_name, last_name, office, status FROM users WHERE user_id = $1',
             user_id
         )
         return row
+
+# Добавление в лист ожидания
+async def add_to_waiting_list(user_id: int, book_title: str, office: str):
+    """Добавление пользователя в лист ожидания для книги"""
+    async with db.pool.acquire() as conn:
+        try:
+            await conn.execute(
+                '''
+                INSERT INTO waiting_list (user_id, book_title, office)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, book_title, office) DO NOTHING
+                ''',
+                user_id, book_title, office
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении в лист ожидания: {e}")
+            return False
+
+# Получение первого в листе ожидания
+async def get_first_in_waiting_list(book_title: str, office: str):
+    """Получение первого пользователя в листе ожидания для книги"""
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            '''
+            SELECT user_id FROM waiting_list 
+            WHERE book_title = $1 AND office = $2 AND NOT notified
+            ORDER BY added_at ASC
+            LIMIT 1
+            ''',
+            book_title, office
+        )
+        return row
+
+# Удаление из листа ожидания
+async def remove_from_waiting_list(user_id: int, book_title: str, office: str):
+    """Удаление пользователя из листа ожидания"""
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            '''
+            DELETE FROM waiting_list 
+            WHERE user_id = $1 AND book_title = $2 AND office = $3
+            ''',
+            user_id, book_title, office
+        )
+
+# Уведомление следующего в листе ожидания
+async def notify_next_in_waiting_list(book_title: str, office: str):
+    """Уведомление следующего пользователя в листе ожидания"""
+    async with db.pool.acquire() as conn:
+        # Получаем первого в очереди
+        waiting_user = await get_first_in_waiting_list(book_title, office)
+        
+        if waiting_user:
+            user_id = waiting_user['user_id']
+            
+            # Получаем информацию о пользователе
+            user_info = await get_user_info(user_id)
+            if user_info:
+                first_name = user_info['first_name']
+                
+                # Отправляем уведомление
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"🎉 {first_name}, книга '{book_title}' освободилась! "
+                        f"Хотите её забронировать?",
+                        reply_markup=get_waitlist_notification_keyboard(book_title, office)
+                    )
+                    
+                    # Помечаем как уведомленного
+                    await conn.execute(
+                        '''
+                        UPDATE waiting_list 
+                        SET notified = TRUE 
+                        WHERE user_id = $1 AND book_title = $2 AND office = $3
+                        ''',
+                        user_id, book_title, office
+                    )
+                    
+                    return True
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке уведомления: {e}")
+        
+        return False
 
 # Формирование списка книг для сообщения
 def format_books_list(books):
@@ -370,6 +475,20 @@ def get_booking_keyboard(book_title: str):
     builder.adjust(1)
     return builder.as_markup()
 
+def get_waitlist_choice_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Добавить в лист ожидания", callback_data="waitlist_add")
+    builder.button(text="Выбрать другую книгу", callback_data="waitlist_other")
+    builder.adjust(1)
+    return builder.as_markup()
+
+def get_waitlist_notification_keyboard(book_title: str, office: str):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Забронировать эту книгу", callback_data=f"waitlist_book_{book_title}_{office}")
+    builder.button(text="Выбрать другую книгу", callback_data="action_book")
+    builder.adjust(1)
+    return builder.as_markup()
+
 # Безопасное редактирование сообщений
 async def safe_edit_message(message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
     """Безопасное редактирование сообщения с обработкой ошибок"""
@@ -409,6 +528,9 @@ async def check_reminders():
                     if not booking_start or not booking_end:
                         continue
                     
+                    # Храним время последнего напоминания для каждого пользователя
+                    last_reminder_key = f"last_reminder_{user_id}_{book_title}"
+                    
                     # Проверяем напоминания для разных сроков
                     if duration == "1 час":
                         # Напоминание за 15 минут до окончания
@@ -424,21 +546,27 @@ async def check_reminders():
                             except Exception as e:
                                 logger.error(f"Ошибка отправки напоминания: {e}")
                         
-                        # Напоминание об окончании брони
+                        # Напоминание об окончании брони каждые 2 часа
                         if current_time >= booking_end:
-                            try:
-                                await bot.send_message(
-                                    user_id,
-                                    f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
-                                    reply_markup=get_booking_keyboard(book_title)
-                                )
-                            except Exception as e:
-                                logger.error(f"Ошибка отправки напоминания об окончании: {e}")
+                            # Проверяем, когда было последнее напоминание
+                            last_reminder = getattr(check_reminders, last_reminder_key, None)
+                            
+                            if last_reminder is None or (current_time - last_reminder) >= timedelta(hours=2):
+                                try:
+                                    await bot.send_message(
+                                        user_id,
+                                        f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
+                                        reply_markup=get_booking_keyboard(book_title)
+                                    )
+                                    # Сохраняем время последнего напоминания
+                                    setattr(check_reminders, last_reminder_key, current_time)
+                                except Exception as e:
+                                    logger.error(f"Ошибка отправки напоминания об окончании: {e}")
                     
                     elif duration == "1 неделя":
-                        # Напоминание за день до окончания (5-й день)
+                        # Напоминание на 5-й день
                         day_5 = booking_start + timedelta(days=5)
-                        if current_time.date() == day_5.date() and current_time.hour == 9:  # В 9 утра 5-го дня
+                        if current_time.date() == day_5.date() and current_time.hour == 9:
                             try:
                                 await bot.send_message(
                                     user_id,
@@ -447,11 +575,38 @@ async def check_reminders():
                                 )
                             except Exception as e:
                                 logger.error(f"Ошибка отправки напоминания за день: {e}")
+                        
+                        # Напоминание на 6-й день
+                        day_6 = booking_start + timedelta(days=6)
+                        if current_time.date() == day_6.date() and current_time.hour == 9:
+                            try:
+                                await bot.send_message(
+                                    user_id,
+                                    f"Не забудь вернуть книгу '{book_title}' сегодня",
+                                    reply_markup=get_booking_keyboard(book_title)
+                                )
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки напоминания за день: {e}")
+                        
+                        # Напоминание об окончании каждые 2 часа
+                        if current_time >= booking_end:
+                            last_reminder = getattr(check_reminders, last_reminder_key, None)
+                            
+                            if last_reminder is None or (current_time - last_reminder) >= timedelta(hours=2):
+                                try:
+                                    await bot.send_message(
+                                        user_id,
+                                        f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
+                                        reply_markup=get_booking_keyboard(book_title)
+                                    )
+                                    setattr(check_reminders, last_reminder_key, current_time)
+                                except Exception as e:
+                                    logger.error(f"Ошибка отправки напоминания об окончании: {e}")
                     
                     elif duration == "1 месяц":
-                        # Напоминание за неделю до окончания
-                        week_3_end = booking_start + timedelta(weeks=3)
-                        if current_time.date() == week_3_end.date() and current_time.hour == 9:
+                        # Напоминание на 21-й день (начало 4-й недели)
+                        day_21 = booking_start + timedelta(days=21)
+                        if current_time.date() == day_21.date() and current_time.hour == 9:
                             try:
                                 await bot.send_message(
                                     user_id,
@@ -459,6 +614,33 @@ async def check_reminders():
                                 )
                             except Exception as e:
                                 logger.error(f"Ошибка отправки напоминания за неделю: {e}")
+                        
+                        # Напоминание на 27-й день
+                        day_27 = booking_start + timedelta(days=27)
+                        if current_time.date() == day_27.date() and current_time.hour == 9:
+                            try:
+                                await bot.send_message(
+                                    user_id,
+                                    f"Не забудь вернуть книгу '{book_title}' сегодня",
+                                    reply_markup=get_booking_keyboard(book_title)
+                                )
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки напоминания за день: {e}")
+                        
+                        # Напоминание об окончании каждые 2 часа
+                        if current_time >= booking_end:
+                            last_reminder = getattr(check_reminders, last_reminder_key, None)
+                            
+                            if last_reminder is None or (current_time - last_reminder) >= timedelta(hours=2):
+                                try:
+                                    await bot.send_message(
+                                        user_id,
+                                        f"Бронь книги '{book_title}' закончилась. Пожалуйста, верни книгу.",
+                                        reply_markup=get_booking_keyboard(book_title)
+                                    )
+                                    setattr(check_reminders, last_reminder_key, current_time)
+                                except Exception as e:
+                                    logger.error(f"Ошибка отправки напоминания об окончании: {e}")
         
         except Exception as e:
             logger.error(f"Ошибка при проверке напоминаний: {e}")
@@ -471,20 +653,61 @@ async def check_reminders():
 async def cmd_start(message: Message, state: FSMContext):
     """Обработчик команды /start"""
     await state.clear()
-    await message.answer(
-        "Привет! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
-        reply_markup=get_start_keyboard()
-    )
+    
+    # Проверяем, есть ли пользователь в базе данных
+    user_info = await get_user_info(message.from_user.id)
+    
+    if user_info:
+        first_name = user_info['first_name']
+        await message.answer(
+            f"Привет, {first_name}! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
+            reply_markup=get_start_keyboard()
+        )
+    else:
+        await message.answer(
+            "Привет! Я бот библиотеки Stone. Нажми кнопку 'Начать', чтобы начать работу с библиотекой.",
+            reply_markup=get_start_keyboard()
+        )
 
 @router.callback_query(F.data == "start")
 async def process_start(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Начать'"""
-    await callback.message.edit_text(
-        "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
-        "а также забронировать ту книгу, которая вам интересна. "
-        "Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
-    )
-    await state.set_state(UserStates.waiting_for_name)
+    # Проверяем, есть ли пользователь в базе данных
+    user_info = await get_user_info(callback.from_user.id)
+    
+    if user_info:
+        first_name = user_info['first_name']
+        office = user_info['office']
+        
+        if office:
+            # Если офис уже известен
+            await callback.message.edit_text(
+                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+                "а также забронировать ту книгу, которая вам интересна. "
+                "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+                reply_markup=get_action_keyboard()
+            )
+            await state.set_state(UserStates.waiting_for_book_title)
+            await state.update_data(first_name=first_name, office=office)
+        else:
+            # Если офис не известен
+            await callback.message.edit_text(
+                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+                "а также забронировать ту книгу, которая вам интересна. "
+                f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+                "чтобы я мог подсказать книги в наличии",
+                reply_markup=get_office_keyboard()
+            )
+            await state.set_state(UserStates.waiting_for_office)
+            await state.update_data(first_name=first_name)
+    else:
+        # Если пользователя нет в базе
+        await callback.message.edit_text(
+            "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+            "а также забронировать ту книгу, которая вам интересна. "
+            "Для начала давайте познакомимся! Напишите, пожалуйста свои Имя и Фамилию"
+        )
+        await state.set_state(UserStates.waiting_for_name)
 
 @router.message(StateFilter(UserStates.waiting_for_name))
 async def process_name(message: Message, state: FSMContext):
@@ -511,7 +734,8 @@ async def process_name(message: Message, state: FSMContext):
 # Обработчик для текстовых сообщений в состояниях ожидания кнопок
 @router.message(StateFilter(UserStates.waiting_for_office, 
                            UserStates.waiting_for_confirmation,
-                           UserStates.waiting_for_duration))
+                           UserStates.waiting_for_duration,
+                           UserStates.waiting_for_waitlist_choice))
 async def ignore_text_in_button_states(message: Message):
     """Игнорирование текстовых сообщений в состояниях с кнопками"""
     await message.answer(
@@ -609,10 +833,107 @@ async def process_book_title(message: Message, state: FSMContext):
     
     title = book_info['title']
     author = book_info['author']
+    status = book_info['status']
+    
+    if status == 'booked':
+        # Книга уже забронирована, предлагаем лист ожидания
+        await message.answer(
+            f"Книга '{title}' от автора {author} сейчас находится у другого пользователя. "
+            "Хотите ли добавить книгу в лист ожидания?",
+            reply_markup=get_waitlist_choice_keyboard()
+        )
+        await state.update_data(book_title=title, author=author)
+        await state.set_state(UserStates.waiting_for_waitlist_choice)
+        return
+    
+    # Книга доступна
     await state.update_data(book_title=title, author=author)
     
     await message.answer(
         f"{first_name}, ты хочешь забронировать книгу '{title}' от автора {author}?",
+        reply_markup=get_confirmation_keyboard()
+    )
+    await state.set_state(UserStates.waiting_for_confirmation)
+
+@router.callback_query(StateFilter(UserStates.waiting_for_waitlist_choice), F.data == "waitlist_add")
+async def process_waitlist_add(callback: CallbackQuery, state: FSMContext):
+    """Обработчик добавления в лист ожидания"""
+    data = await state.get_data()
+    book_title = data.get('book_title')
+    office = data.get('office')
+    first_name = data.get('first_name')
+    
+    if not book_title or not office:
+        await callback.answer("Ошибка: данные не найдены")
+        return
+    
+    # Добавляем в лист ожидания
+    success = await add_to_waiting_list(callback.from_user.id, book_title, office)
+    
+    if success:
+        await callback.message.edit_text(
+            f"Вы добавлены в лист ожидания для книги '{book_title}'. "
+            f"Я уведомлю вас, когда книга освободится."
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="Выбрать другую книгу", callback_data="action_book")
+        
+        await callback.message.answer(
+            "Вы можете выбрать другую книгу, пока ждёте освобождения этой:",
+            reply_markup=builder.as_markup()
+        )
+    else:
+        await callback.message.edit_text(
+            "Произошла ошибка при добавлении в лист ожидания. Пожалуйста, попробуйте позже."
+        )
+    
+    await state.clear()
+
+@router.callback_query(StateFilter(UserStates.waiting_for_waitlist_choice), F.data == "waitlist_other")
+async def process_waitlist_other(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора другой книги"""
+    data = await state.get_data()
+    first_name = data.get('first_name')
+    office = data.get('office')
+    
+    await callback.message.edit_text(
+        f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+        reply_markup=get_action_keyboard()
+    )
+    await state.set_state(UserStates.waiting_for_book_title)
+
+@router.callback_query(F.data.startswith("waitlist_book_"))
+async def process_waitlist_book(callback: CallbackQuery, state: FSMContext):
+    """Обработчик бронирования книги из листа ожидания"""
+    # Извлекаем данные из callback_data
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer("Ошибка в данных")
+        return
+    
+    book_title = "_".join(parts[2:-1])
+    office = parts[-1]
+    
+    # Получаем информацию о пользователе
+    user_info = await get_user_info(callback.from_user.id)
+    if not user_info:
+        await callback.answer("Ошибка: пользователь не найден")
+        return
+    
+    first_name = user_info['first_name']
+    
+    # Проверяем, доступна ли книга
+    book_info = await book_exists_in_office(book_title, office)
+    
+    if not book_info or book_info['status'] != 'available':
+        await callback.answer("Книга больше не доступна")
+        return
+    
+    await state.update_data(book_title=book_title, author=book_info['author'], office=office, first_name=first_name)
+    
+    await callback.message.edit_text(
+        f"{first_name}, ты хочешь забронировать книгу '{book_title}' от автора {book_info['author']}?",
         reply_markup=get_confirmation_keyboard()
     )
     await state.set_state(UserStates.waiting_for_confirmation)
@@ -836,10 +1157,11 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
     # Если офис уже известен - переходим к выбору действия
     if office:
         await callback.message.edit_text(
-            "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+            f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
             reply_markup=get_action_keyboard()
         )
         await state.set_state(UserStates.waiting_for_book_title)
+        await state.update_data(first_name=first_name, office=office)
     else:
         # Если офис не известен - просим выбрать офис
         await callback.message.edit_text(
@@ -848,6 +1170,7 @@ async def process_action_book_any_state(callback: CallbackQuery, state: FSMConte
             reply_markup=get_office_keyboard()
         )
         await state.set_state(UserStates.waiting_for_office)
+        await state.update_data(first_name=first_name)
 
 # Функция ожидания подключения к базе данных
 async def wait_for_db():
