@@ -105,19 +105,25 @@ async def init_db():
         )
         ''')
         
-        # Таблица книг с полками и этажами для Stone Towers
+        # Таблица книг
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS books (
             id SERIAL PRIMARY KEY,
             title TEXT NOT NULL,
             author TEXT NOT NULL,
             office TEXT NOT NULL,
-            shelf INTEGER,
-            floor INTEGER,
             status TEXT DEFAULT 'available',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
+        # Проверяем и добавляем колонки shelf и floor, если их нет
+        try:
+            await conn.execute('ALTER TABLE books ADD COLUMN IF NOT EXISTS shelf INTEGER;')
+            await conn.execute('ALTER TABLE books ADD COLUMN IF NOT EXISTS floor INTEGER;')
+            logger.info("Колонки shelf и floor добавлены или уже существуют")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении колонок: {e}")
         
         # Таблица бронирований
         await conn.execute('''
@@ -172,6 +178,24 @@ async def init_db():
                 )
             
             logger.info("Добавлены начальные данные в таблицу книг с полками и этажами")
+        else:
+            # Обновляем существующие записи для Stone Towers с полками и этажами
+            stone_books = [
+                ("книга а", 1, 5),
+                ("книга в", 4, 5),
+                ("книга с", 3, 6)
+            ]
+            
+            for title, shelf, floor in stone_books:
+                await conn.execute(
+                    '''
+                    UPDATE books 
+                    SET shelf = $1, floor = $2 
+                    WHERE LOWER(title) = LOWER($3) AND office = 'Stone Towers'
+                    ''',
+                    shelf, floor, title
+                )
+            logger.info("Обновлены полки и этажи для книг в Stone Towers")
         
         logger.info("База данных инициализирована")
 
@@ -675,7 +699,7 @@ async def cmd_start(message: Message, state: FSMContext):
         else:
             # Если офис не известен
             await message.answer(
-                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со спиком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
                 f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
                 "чтобы я мог подсказать книги в наличии",
@@ -1098,13 +1122,34 @@ async def process_return_photo(message: Message, state: FSMContext):
             caption=f"Пользователь {first_name} {last_name} вернул книгу '{book_title}'"
         )
         
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Забронировать", callback_data="action_book")
-        
-        await message.answer(
-            "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе.",
-            reply_markup=builder.as_markup()
-        )
+        # После возврата книги - пользователь свободен, можно бронировать новую
+        # Получаем актуальную информацию о пользователе
+        user_info = await get_user_info(message.from_user.id)
+        if user_info:
+            first_name = user_info['first_name']
+            office = user_info['office']
+            
+            await message.answer(
+                "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе."
+            )
+            
+            # Если офис известен - предлагаем сразу выбрать действие
+            if office:
+                await message.answer(
+                    f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+                    reply_markup=get_action_keyboard()
+                )
+                await state.set_state(UserStates.waiting_for_book_title)
+                await state.update_data(first_name=first_name, office=office)
+            else:
+                # Если офис не известен - просим выбрать офис
+                await message.answer(
+                    f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+                    "чтобы я мог подсказать книги в наличии",
+                    reply_markup=get_office_keyboard()
+                )
+                await state.set_state(UserStates.waiting_for_office)
+                await state.update_data(first_name=first_name)
         
         await state.clear()
     except Exception as e:
