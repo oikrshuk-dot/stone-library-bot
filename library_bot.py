@@ -500,6 +500,13 @@ def get_return_book_keyboard(book_title: str):
     builder.adjust(1)
     return builder.as_markup()
 
+def get_book_again_keyboard():
+    """Кнопка для бронирования ещё одной книги после возврата"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Забронировать ещё", callback_data="action_book")
+    builder.adjust(1)
+    return builder.as_markup()
+
 def get_waitlist_choice_keyboard():
     builder = InlineKeyboardBuilder()
     builder.button(text="Добавить в лист ожидания", callback_data="waitlist_add")
@@ -699,7 +706,7 @@ async def cmd_start(message: Message, state: FSMContext):
         else:
             # Если офис не известен
             await message.answer(
-                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со спиком книг в наличии, "
+                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
                 f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
                 "чтобы я мог подсказать книги в наличии",
@@ -1039,13 +1046,16 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             callback.from_user.id, book_title, office, duration
         )
         
-        # Отправляем уведомление в группу
+        # Отправляем уведомление в группу с Telegram ID
         user_info = await get_user_info(callback.from_user.id)
         if user_info:
             last_name = user_info['last_name']
+            user_id = callback.from_user.id  # Telegram ID пользователя
+            
+            # Добавляем Telegram ID в сообщение
             await bot.send_message(
                 GROUP_CHAT_ID,
-                f"Пользователь {first_name} {last_name} забронировал книгу '{book_title}' на срок {duration}"
+                f"Пользователь {first_name} {last_name} (ID: {user_id}) забронировал книгу '{book_title}' на срок {duration}"
             )
         
         # После бронирования сразу показываем кнопку для возврата книги
@@ -1114,42 +1124,23 @@ async def process_return_photo(message: Message, state: FSMContext):
     try:
         await complete_booking(message.from_user.id, book_title, office)
         
-        # Отправляем уведомление в группу с фото
+        # Отправляем уведомление в группу с фото и Telegram ID
         photo = message.photo[-1]
+        user_id = message.from_user.id  # Telegram ID пользователя
+        
+        # Добавляем Telegram ID в сообщение
         await bot.send_photo(
             GROUP_CHAT_ID,
             photo.file_id,
-            caption=f"Пользователь {first_name} {last_name} вернул книгу '{book_title}'"
+            caption=f"Пользователь {first_name} {last_name} (ID: {user_id}) вернул книгу '{book_title}'"
         )
         
-        # После возврата книги - пользователь свободен, можно бронировать новую
-        # Получаем актуальную информацию о пользователе
-        user_info = await get_user_info(message.from_user.id)
-        if user_info:
-            first_name = user_info['first_name']
-            office = user_info['office']
-            
-            await message.answer(
-                "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе."
-            )
-            
-            # Если офис известен - предлагаем сразу выбрать действие
-            if office:
-                await message.answer(
-                    f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
-                    reply_markup=get_action_keyboard()
-                )
-                await state.set_state(UserStates.waiting_for_book_title)
-                await state.update_data(first_name=first_name, office=office)
-            else:
-                # Если офис не известен - просим выбрать офис
-                await message.answer(
-                    f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
-                    "чтобы я мог подсказать книги в наличии",
-                    reply_markup=get_office_keyboard()
-                )
-                await state.set_state(UserStates.waiting_for_office)
-                await state.update_data(first_name=first_name)
+        # После возврата книги - благодарим и предлагаем кнопку "Забронировать ещё"
+        await message.answer(
+            "Спасибо, что вернул книгу. Надеюсь она была интересной и понравилась тебе.\n\n"
+            "Если захочешь забронировать ещё одну книгу - просто нажми кнопку ниже 👇",
+            reply_markup=get_book_again_keyboard()
+        )
         
         await state.clear()
     except Exception as e:
