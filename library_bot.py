@@ -1319,9 +1319,89 @@ async def process_book_request(message: Message, state: FSMContext):
     )
     await state.clear()
 
+
+#------------------------------ Статистика ------------------------------
+async def send_statistics(trigger_message: Message):
+    """Собирает статистику по всем пользователям и отправляет в группу"""
+    async with db.pool.acquire() as conn:
+        # Все пользователи
+        users = await conn.fetch('SELECT user_id, first_name, last_name FROM users ORDER BY user_id')
+        
+        if not users:
+            await trigger_message.reply("❌ В базе нет пользователей.")
+            return
+
+        lines = []
+        for user in users:
+            uid = user['user_id']
+            first = user['first_name'] or ''
+            last = user['last_name'] or ''
+            full_name = f"{first} {last}".strip()
+
+            # Активные бронирования (статус 'active')
+            active = await conn.fetchval(
+                'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2',
+                uid, 'active'
+            ) or 0
+
+            # Завершённые без продления
+            completed_no_ext = await conn.fetchval(
+                'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2 AND extension_made = $3',
+                uid, 'completed', False
+            ) or 0
+
+            # Завершённые с продлением
+            completed_ext = await conn.fetchval(
+                'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2 AND extension_made = $3',
+                uid, 'completed', True
+            ) or 0
+
+            # Просроченные (было отправлено уведомление о просрочке)
+            overdue = await conn.fetchval(
+                'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND overdue_notified = $2',
+                uid, True
+            ) or 0
+
+            # Статистика для одного пользователя
+            line = (
+                f"• {uid} — {full_name}\n"
+                f"  ▫️ Активных: {active} | Заверш. без продл.: {completed_no_ext} | "
+                f"С продл.: {completed_ext} | Просрочек: {overdue}\n"
+            )
+            lines.append(line)
+
+    # Разбиваем на части, если сообщение слишком длинное
+    full_text = "📊 **Статистика пользователей библиотеки:**\n\n" + "".join(lines)
+    
+    # Telegram лимит: 4096 символов
+    if len(full_text) <= 4096:
+        await trigger_message.reply(full_text, parse_mode="Markdown")
+    else:
+        # Отправляем по частям
+        parts = []
+        current_part = "📊 **Статистика (часть 1):**\n\n"
+        part_num = 1
+        for line in lines:
+            if len(current_part) + len(line) > 4000:
+                parts.append(current_part)
+                part_num += 1
+                current_part = f"📊 **Статистика (часть {part_num}):**\n\n"
+            current_part += line
+        parts.append(current_part)
+
+        for part in parts:
+            await trigger_message.reply(part, parse_mode="Markdown")
+            await asyncio.sleep(0.3)  # небольшая пауза между сообщениями
+
 # ------------------------------ Массовая рассылка из группы ------------------------------
 @router.message(F.chat.id == GROUP_CHAT_ID, F.text, ~F.from_user.is_bot)
 async def broadcast_from_group(message: Message):
+    # Статистика
+    if message.text.strip().lower() == "статистика":
+        await send_statistics(message)
+        return
+
+    # Рассылка
     if message.from_user.id == bot.id:
         return
     async with db.pool.acquire() as conn:
@@ -1375,3 +1455,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
