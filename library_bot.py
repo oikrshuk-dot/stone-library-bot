@@ -87,6 +87,7 @@ class UserStates(StatesGroup):
     waiting_for_photo = State()
     waiting_for_return_completion = State()      # после фото, перед завершением возврата
     waiting_for_waitlist_choice = State()
+    waiting_for_book_request = State()
 
 # --- Инициализация БД ---
 async def init_db():
@@ -423,6 +424,14 @@ async def add_book_command(user_id: int):
     await set_user_commands(user_id, [
         BotCommand(command="rules", description="📚 Правила библиотеки"),
         BotCommand(command="book", description="📖 Забронировать книгу")
+    ])
+
+async def add_book_and_request_commands(user_id: int):
+    """Добавить команды бронирования и запроса книги в меню"""
+    await set_user_commands(user_id, [
+        BotCommand(command="rules", description="📚 Правила библиотеки"),
+        BotCommand(command="book", description="📖 Забронировать книгу"),
+        BotCommand(command="request", description="📋 Запросить книгу")
     ])
 
 async def remove_return_command(user_id: int):
@@ -893,20 +902,24 @@ async def process_book_title(message: Message, state: FSMContext):
     data = await state.get_data()
     office = data.get('office')
     first_name = data.get('first_name')
+    
     if not office or not first_name:
         await message.answer("Ошибка: данные о пользователе не найдены. Начните сначала.")
         await state.clear()
         return
-
+    
     book_title = message.text.strip()
+    
     if book_title.lower() == "нет":
-        await message.answer("Жаль что тут нет подходящей книги, заходи в другой раз!")
-        builder = InlineKeyboardBuilder()
-        builder.button(text="Забронировать", callback_data="action_book")
+        # ✅ Новый функционал: добавляем команды в меню, убираем инлайн-кнопки
+        await add_book_and_request_commands(message.from_user.id)
+        
         await message.answer(
-            "Если захочешь забронировать книгу, просто нажми кнопку забронировать",
-            reply_markup=builder.as_markup()
+            f"{first_name}, жаль что тут нет подходящей для Вас книги.\n\n"
+            "Вы можете забронировать любую другую книгу или направить запрос в HR для заказа интересующей Вас книги.\n"
+            "Для этого нажмите соответствующие кнопки в меню."
         )
+        await state.clear()  # выходим из процесса бронирования
         return
 
     book_info = await book_exists_in_office(book_title, office)
@@ -983,6 +996,91 @@ async def process_waitlist_other(callback: CallbackQuery, state: FSMContext):
         reply_markup=get_action_keyboard()
     )
     await state.set_state(UserStates.waiting_for_book_title)
+
+@router.message(Command("request"))
+async def cmd_request(message: Message, state: FSMContext):
+    """Обработчик команды /request — запрос новой книги"""
+    user_id = message.from_user.id
+    
+    # Проверяем, нет ли активного бронирования
+    booking_info = await get_user_booking(user_id)
+    if booking_info and booking_info['current_book']:
+        await message.answer("❌ У вас уже есть активное бронирование. Сначала верните книгу.")
+        return
+    
+    # Убираем команды /book и /request из меню (оставляем только /rules)
+    await remove_book_command(user_id)  # сбрасывает на /rules
+    
+    user_info = await get_user_info(user_id)
+    if not user_info:
+        await message.answer("❌ Ошибка: пользователь не найден. Напишите /start")
+        return
+    
+    # Сохраняем имя и фамилию для последующей отправки в группу
+    await state.update_data(
+        first_name=user_info['first_name'],
+        last_name=user_info['last_name']
+    )
+    
+    await state.set_state(UserStates.waiting_for_book_request)
+    
+    await message.answer(
+        "📚 Хотите направить запрос на заказ книги для библиотеки?\n\n"
+        "Мы рады пополнению! Новые книги должны соответствовать одному из критериев:\n"
+        "• О бизнесе и управлении\n"
+        "• О процессах и культуре нашей компании\n"
+        "• Социально-психологическая литература\n\n"
+        "Не добавляем: учебники, техническую документацию, современную массовую литературу без художественной ценности.\n\n"
+        "Напишите, пожалуйста, название интересующей вас книги и автора данной книги."
+    )
+
+@router.message(StateFilter(UserStates.waiting_for_book_request))
+async def process_book_request(message: Message, state: FSMContext):
+    """Обработчик текста запроса новой книги"""
+    user_id = message.from_user.id
+    data = await state.get_data()
+    
+    first_name = data.get('first_name')
+    last_name = data.get('last_name')
+    
+    # Если по какой-то причине данных нет в состоянии — берём из БД
+    if not first_name or not last_name:
+        user_info = await get_user_info(user_id)
+        if user_info:
+            first_name = user_info['first_name']
+            last_name = user_info['last_name']
+        else:
+            await message.answer("❌ Ошибка: пользователь не найден.")
+            await state.clear()
+            return
+    
+    request_text = message.text.strip()
+    if not request_text:
+        await message.answer("Пожалуйста, напишите название книги и автора.")
+        return
+    
+    # Отправляем уведомление в группу
+    try:
+        await bot.send_message(
+            GROUP_CHAT_ID,
+            f"🆕 Заказ: Пользователь {first_name} {last_name} (ID: {user_id}) просит заказать в библиотеку:\n\n{request_text}"
+        )
+        logger.info(f"Запрос книги от пользователя {user_id} отправлен в группу")
+    except Exception as e:
+        logger.error(f"Ошибка отправки запроса в группу: {e}")
+        await message.answer("❌ Не удалось отправить запрос. Попробуйте позже.")
+        await state.clear()
+        return
+    
+    # Добавляем в меню кнопку "забронировать" (команда /book)
+    await add_book_command(user_id)
+    
+    await message.answer(
+        f"{first_name}, спасибо! Направили ваш запрос в HR-департамент!\n\n"
+        "Если хотите забронировать книгу из уже имеющегося списка, нажмите в меню кнопку «Забронировать»."
+    )
+    
+    await state.clear()
 
 @router.callback_query(F.data.startswith("waitlist_book_"))
 async def process_waitlist_book(callback: CallbackQuery, state: FSMContext):
@@ -1248,6 +1346,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
