@@ -1094,7 +1094,7 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             user_id = callback.from_user.id
             await bot.send_message(
                 GROUP_CHAT_ID,
-                f"Пользователь {first_name} {last_name} (ID: {user_id}) забронировал книгу '{book_title}' на срок {duration}"
+                f"✅️ Бронирование: Пользователь {first_name} {last_name} (ID: {user_id}) забронировал книгу '{book_title}' на срок {duration}"
             )
 
         await safe_edit_message(
@@ -1173,7 +1173,7 @@ async def process_return_photo(message: Message, state: FSMContext):
         await bot.send_photo(
             GROUP_CHAT_ID,
             photo.file_id,
-            caption=f"Пользователь {first_name} {last_name} (ID: {user_id}) вернул книгу '{book_title}'"
+            caption=f"❎️ Возврат: Пользователь {first_name} {last_name} (ID: {user_id}) вернул книгу '{book_title}'"
         )
         await message.answer(
             "Спасибо, что вернул книгу. Надеюсь, она была интересной и понравилась тебе.",
@@ -1248,5 +1248,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
