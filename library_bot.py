@@ -93,40 +93,47 @@ async def init_db():
     async with db.pool.acquire() as conn:
         # Таблица пользователей
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                first_name TEXT NOT NULL,
-                last_name TEXT,
-                office TEXT,
-                current_book TEXT,
-                booking_start TIMESTAMP,
-                booking_duration TEXT,
-                booking_end TIMESTAMP,
-                status TEXT DEFAULT 'available',
-                rules_accepted BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            first_name TEXT NOT NULL,
+            last_name TEXT,
+            office TEXT,
+            current_book TEXT,
+            booking_start TIMESTAMP,
+            booking_duration TEXT,
+            booking_end TIMESTAMP,
+            status TEXT DEFAULT 'available',
+            rules_accepted BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         ''')
+
+        # Добавляем колонку rules_accepted, если её нет (для существующих таблиц)
+        try:
+            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS rules_accepted BOOLEAN DEFAULT FALSE;')
+            logger.info("Колонка rules_accepted добавлена или уже существует")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении колонки rules_accepted: {e}")
 
         # Таблица книг
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS books (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                author TEXT NOT NULL,
-                office TEXT NOT NULL,
-                status TEXT DEFAULT 'available',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+        CREATE TABLE IF NOT EXISTS books (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            author TEXT NOT NULL,
+            office TEXT NOT NULL,
+            status TEXT DEFAULT 'available',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         ''')
 
-        # Добавляем колонки shelf и floor, если их нет
+        # Проверяем и добавляем колонки shelf и floor, если их нет
         try:
             await conn.execute('ALTER TABLE books ADD COLUMN IF NOT EXISTS shelf INTEGER;')
             await conn.execute('ALTER TABLE books ADD COLUMN IF NOT EXISTS floor INTEGER;')
             logger.info("Колонки shelf и floor добавлены или уже существуют")
         except Exception as e:
-            logger.error(f"Ошибка при добавлении колонок: {e}")
+            logger.error(f"Ошибка при добавлении колонок shelf/floor: {e}")
 
         # Таблица бронирований
         await conn.execute('''
@@ -1231,3 +1238,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
