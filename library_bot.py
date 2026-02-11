@@ -1039,12 +1039,22 @@ async def process_confirmation_no(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "return_cancel")
 async def process_return_cancel(callback: CallbackQuery, state: FSMContext):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="Забронировать", callback_data="action_book")
+    # Получаем данные из состояния
+    data = await state.get_data()
+    first_name = data.get('first_name', '')
+    user_id = callback.from_user.id
+
+    # Добавляем команду "Забронировать" в меню (вместе с "Правила библиотеки")
+    await add_book_command(user_id)
+
+    # Отправляем сообщение без инлайн-кнопок, со ссылкой на меню
     await callback.message.edit_text(
-        "Если захочешь забронировать книгу, просто нажми кнопку забронировать",
-        reply_markup=builder.as_markup()
+        f"{first_name}, вы отказались от бронирования книги.\n\n"
+        f"Если вы захотите забронировать книгу, вы можете нажать кнопку «Забронировать» в меню.\n"
+        f"Также в меню вы сможете повторно ознакомиться с правилами библиотеки."
     )
+
+    # Очищаем состояние — пользователь больше не в процессе бронирования
     await state.clear()
 
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "return_another")
@@ -1238,4 +1248,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
