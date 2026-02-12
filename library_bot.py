@@ -45,6 +45,10 @@ dp.include_router(router)
 
 RULES_URL = "https://docs.google.com/document/d/1l9nUMiQPCYPPoV_deUjroP2BZb6MRRRBVtw_D57NAxs/edit?usp=sharing"
 
+# ------------------------------ Глобальные переменные для админ-режимов ------------------------------
+group_awaiting_action = None      # 'books' или 'users'
+group_awaiting_author = None     # user_id, кто вызвал команду
+
 # ------------------------------ База данных ------------------------------
 class Database:
     def __init__(self):
@@ -132,6 +136,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS bookings (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT REFERENCES users(user_id),
+                book_id INTEGER REFERENCES books(id),
                 book_title TEXT NOT NULL,
                 office TEXT NOT NULL,
                 start_time TIMESTAMP NOT NULL,
@@ -144,9 +149,10 @@ async def init_db():
             )
         ''')
         try:
+            await conn.execute('ALTER TABLE bookings ADD COLUMN IF NOT EXISTS book_id INTEGER REFERENCES books(id);')
             await conn.execute('ALTER TABLE bookings ADD COLUMN IF NOT EXISTS extension_made BOOLEAN DEFAULT FALSE;')
             await conn.execute('ALTER TABLE bookings ADD COLUMN IF NOT EXISTS overdue_notified BOOLEAN DEFAULT FALSE;')
-            logger.info("Колонки extension_made/overdue_notified добавлены/существуют")
+            logger.info("Колонки book_id, extension_made, overdue_notified добавлены/существуют")
         except Exception as e:
             logger.error(f"Ошибка добавления колонок в bookings: {e}")
 
@@ -221,37 +227,55 @@ async def get_user_info(user_id: int):
         )
 
 async def get_books_by_office(office: str):
+    """Возвращает ВСЕ доступные экземпляры книг в офисе"""
     async with db.pool.acquire() as conn:
         return await conn.fetch(
-            'SELECT title, author, shelf, floor FROM books WHERE office = $1 AND status = $2',
+            'SELECT id, title, author, shelf, floor FROM books WHERE office = $1 AND status = $2 ORDER BY title, id',
             office, 'available'
         )
 
 async def book_exists_in_office(title: str, office: str):
-    async with db.pool.acquire() as conn:
-        return await conn.fetchrow(
-            'SELECT title, author, status, shelf, floor FROM books WHERE LOWER(title) = LOWER($1) AND office = $2',
-            title, office
-        )
-
-async def update_book_status(title: str, office: str, status: str):
-    async with db.pool.acquire() as conn:
-        await conn.execute(
-            'UPDATE books SET status = $1 WHERE LOWER(title) = LOWER($2) AND office = $3',
-            status, title, office
-        )
-
-async def get_user_booking(user_id: int):
+    """Возвращает информацию о первом доступном экземпляре книги в офисе"""
     async with db.pool.acquire() as conn:
         return await conn.fetchrow(
             '''
-            SELECT current_book, booking_start, booking_duration, booking_end 
-            FROM users WHERE user_id = $1 AND status = 'booked'
+            SELECT id, title, author, shelf, floor 
+            FROM books 
+            WHERE LOWER(title) = LOWER($1) 
+              AND office = $2 
+              AND status = 'available'
+            LIMIT 1
+            ''',
+            title, office
+        )
+
+async def update_book_status(book_id: int, status: str):
+    """Обновляет статус конкретного экземпляра книги по его ID"""
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            'UPDATE books SET status = $1 WHERE id = $2',
+            status, book_id
+        )
+
+async def get_user_booking(user_id: int):
+    """Возвращает активное бронирование пользователя с ID брони и ID книги"""
+    async with db.pool.acquire() as conn:
+        return await conn.fetchrow(
+            '''
+            SELECT b.id as booking_id, b.book_id, b.book_title, 
+                   b.start_time as booking_start, 
+                   b.duration as booking_duration, 
+                   b.end_time as booking_end
+            FROM users u
+            JOIN bookings b ON u.user_id = b.user_id AND b.status = 'active'
+            WHERE u.user_id = $1 AND u.status = 'booked'
+            LIMIT 1
             ''',
             user_id
         )
 
-async def create_booking(user_id: int, book_title: str, office: str, duration: str):
+async def create_booking(user_id: int, book_id: int, book_title: str, office: str, duration: str):
+    """Создаёт бронь для конкретного экземпляра книги"""
     async with db.pool.acquire() as conn:
         start_time = datetime.now()
         if duration == "1 час":
@@ -268,16 +292,19 @@ async def create_booking(user_id: int, book_title: str, office: str, duration: s
             raise ValueError(f"Неизвестная длительность: {duration}")
 
         async with conn.transaction():
-            await update_book_status(book_title, office, "booked")
+            # Обновляем статус конкретного экземпляра
+            await update_book_status(book_id, "booked")
+            # Удаляем пользователя из листа ожидания для этой книги
             await remove_from_waiting_list(user_id, book_title, office)
 
             booking_id = await conn.fetchval(
                 '''
-                INSERT INTO bookings (user_id, book_title, office, start_time, duration, end_time, extension_made, overdue_notified)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO bookings 
+                    (user_id, book_id, book_title, office, start_time, duration, end_time, extension_made, overdue_notified)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
                 ''',
-                user_id, book_title, office, start_time, duration, end_time, False, False
+                user_id, book_id, book_title, office, start_time, duration, end_time, False, False
             )
 
             await conn.execute(
@@ -290,10 +317,14 @@ async def create_booking(user_id: int, book_title: str, office: str, duration: s
             )
         return booking_id, end_time
 
-async def complete_booking(user_id: int, book_title: str, office: str):
+async def complete_booking(user_id: int, booking_id: int, book_id: int, book_title: str, office: str):
+    """Завершает бронь и освобождает конкретный экземпляр"""
     async with db.pool.acquire() as conn:
         async with conn.transaction():
-            await update_book_status(book_title, office, "available")
+            # Освобождаем конкретный экземпляр
+            await update_book_status(book_id, "available")
+            
+            # Обновляем пользователя
             await conn.execute(
                 '''
                 UPDATE users 
@@ -302,14 +333,14 @@ async def complete_booking(user_id: int, book_title: str, office: str):
                 ''',
                 user_id
             )
+            
+            # Помечаем бронь как завершённую
             await conn.execute(
-                '''
-                UPDATE bookings 
-                SET status = 'completed' 
-                WHERE user_id = $1 AND book_title = $2 AND status = 'active'
-                ''',
-                user_id, book_title
+                'UPDATE bookings SET status = $1 WHERE id = $2',
+                'completed', booking_id
             )
+            
+            # Уведомляем следующих в листе ожидания
             await notify_next_in_waiting_list(book_title, office)
 
 async def extend_booking(booking_id: int, user_id: int, book_title: str, office: str):
@@ -578,8 +609,8 @@ async def process_start_booking(message: Message, state: FSMContext):
     first_name = user_info['first_name']
     office = user_info['office']
     booking_info = await get_user_booking(message.from_user.id)
-    if booking_info and booking_info['current_book']:
-        current_book = booking_info['current_book']
+    if booking_info and booking_info.get('booking_id'):
+        current_book = booking_info['book_title']
         duration = booking_info['booking_duration']
         await message.answer(
             f"{first_name}, у тебя уже есть активное бронирование книги '{current_book}' на срок {duration}. "
@@ -611,7 +642,7 @@ async def check_reminders():
             async with db.pool.acquire() as conn:
                 rows = await conn.fetch('''
                     SELECT u.user_id, u.first_name, u.last_name, u.office,
-                           b.id as booking_id, b.book_title, b.start_time as booking_start,
+                           b.id as booking_id, b.book_id, b.book_title, b.start_time as booking_start,
                            b.duration as booking_duration, b.end_time as booking_end,
                            b.extension_made, b.overdue_notified
                     FROM users u
@@ -741,8 +772,8 @@ async def cmd_start(message: Message, state: FSMContext):
         office = user_info['office']
         rules_accepted = user_info.get('rules_accepted', False)
         booking_info = await get_user_booking(message.from_user.id)
-        has_booking = booking_info is not None and booking_info.get('current_book') is not None
-        current_book = booking_info['current_book'] if has_booking else None
+        has_booking = booking_info is not None and booking_info.get('booking_id') is not None
+        current_book = booking_info['book_title'] if has_booking else None
 
         if rules_accepted:
             await update_commands_on_start(message.from_user.id, has_booking, current_book)
@@ -794,10 +825,12 @@ async def cmd_rules(message: Message, state: FSMContext):
 async def cmd_return(message: Message, state: FSMContext):
     uid = message.from_user.id
     booking_info = await get_user_booking(uid)
-    if not booking_info or not booking_info['current_book']:
+    if not booking_info or not booking_info.get('booking_id'):
         await message.answer("❌ У вас нет активных бронирований.")
         return
-    book_title = booking_info['current_book']
+    book_title = booking_info['book_title']
+    booking_id = booking_info['booking_id']
+    book_id = booking_info['book_id']
     user_info = await get_user_info(uid)
     if not user_info:
         await message.answer("❌ Ошибка: пользователь не найден.")
@@ -807,7 +840,9 @@ async def cmd_return(message: Message, state: FSMContext):
         book_title=book_title,
         office=user_info['office'],
         first_name=user_info['first_name'],
-        last_name=user_info['last_name']
+        last_name=user_info['last_name'],
+        booking_id=booking_id,
+        book_id=book_id
     )
     await message.answer("📸 Отправьте, пожалуйста, фото книги в библиотеке.")
 
@@ -820,7 +855,7 @@ async def cmd_book(message: Message, state: FSMContext):
 async def cmd_request(message: Message, state: FSMContext):
     uid = message.from_user.id
     booking_info = await get_user_booking(uid)
-    if booking_info and booking_info['current_book']:
+    if booking_info and booking_info.get('booking_id'):
         await message.answer("❌ У вас уже есть активное бронирование. Сначала верните книгу.")
         return
 
@@ -983,6 +1018,7 @@ async def process_book_title(message: Message, state: FSMContext):
     status = book_info['status']
     shelf = book_info['shelf']
     floor = book_info['floor']
+    book_id = book_info['id']
 
     if status == 'booked':
         await message.answer(
@@ -998,7 +1034,13 @@ async def process_book_title(message: Message, state: FSMContext):
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{title}' находится на этаже {floor} на полке {shelf}. "
     msg += f"Хочешь забронировать книгу '{title}' от автора {author}?"
-    await state.update_data(book_title=title, author=author)
+    await state.update_data(
+        book_title=title,
+        author=author,
+        book_id=book_id,
+        shelf=shelf,
+        floor=floor
+    )
     await message.answer(msg, reply_markup=get_confirmation_keyboard())
     await state.set_state(UserStates.waiting_for_confirmation)
 
@@ -1058,7 +1100,14 @@ async def process_waitlist_book(callback: CallbackQuery, state: FSMContext):
         return
     shelf = book_info['shelf']
     floor = book_info['floor']
-    await state.update_data(book_title=book_title, author=book_info['author'], office=office, first_name=first_name)
+    book_id = book_info['id']
+    await state.update_data(
+        book_title=book_title,
+        author=book_info['author'],
+        office=office,
+        first_name=first_name,
+        book_id=book_id
+    )
     msg = f"{first_name}, "
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{book_title}' находится на этаже {floor} на полке {shelf}. "
@@ -1125,12 +1174,18 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     book_title = data.get('book_title')
-    author = data.get('author')
+    book_id = data.get('book_id')
     office = data.get('office')
     first_name = data.get('first_name')
 
     try:
-        bid, end_time = await create_booking(callback.from_user.id, book_title, office, dur)
+        bid, end_time = await create_booking(
+            callback.from_user.id,
+            book_id,
+            book_title,
+            office,
+            dur
+        )
         user_info = await get_user_info(callback.from_user.id)
         if user_info:
             last_name = user_info['last_name']
@@ -1179,16 +1234,22 @@ async def process_return_book(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Ошибка: пользователь не найден")
         return
     booking_info = await get_user_booking(callback.from_user.id)
-    if not booking_info or booking_info['current_book'] != book_title:
+    if not booking_info or booking_info['book_title'] != book_title:
         await callback.answer("У вас нет активного бронирования этой книги")
         return
+
+    booking_id = booking_info['booking_id']
+    book_id = booking_info['book_id']
+
     await callback.message.edit_text("📸 Отправь, пожалуйста, фото книги в библиотеке.")
     await state.set_state(UserStates.waiting_for_photo)
     await state.update_data(
         book_title=book_title,
         office=user_info['office'],
         first_name=user_info['first_name'],
-        last_name=user_info['last_name']
+        last_name=user_info['last_name'],
+        booking_id=booking_id,
+        book_id=book_id
     )
 
 @router.message(StateFilter(UserStates.waiting_for_photo), F.photo)
@@ -1198,8 +1259,16 @@ async def process_return_photo(message: Message, state: FSMContext):
     office = data.get('office')
     first_name = data.get('first_name')
     last_name = data.get('last_name')
+    booking_id = data.get('booking_id')
+    book_id = data.get('book_id')
     try:
-        await complete_booking(message.from_user.id, book_title, office)
+        await complete_booking(
+            message.from_user.id,
+            booking_id,
+            book_id,
+            book_title,
+            office
+        )
         photo = message.photo[-1]
         await bot.send_photo(
             GROUP_CHAT_ID,
@@ -1319,12 +1388,219 @@ async def process_book_request(message: Message, state: FSMContext):
     )
     await state.clear()
 
+# ------------------------------ Админ-функции для работы с книгами и пользователями ------------------------------
 
-#------------------------------ Статистика ------------------------------
+async def send_all_books_list(target_message: Message):
+    """Отправляет в группу полный каталог книг (с полками/этажами для Stone Towers)"""
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT office, title, author, shelf, floor 
+            FROM books 
+            ORDER BY office, title
+        ''')
+    
+    if not rows:
+        await target_message.reply("📚 В библиотеке пока нет ни одной книги.")
+        return
+
+    offices = {}
+    for r in rows:
+        off = r['office']
+        if off not in offices:
+            offices[off] = []
+        offices[off].append(r)
+
+    text_lines = ["📚 **Полный каталог библиотеки:**\n"]
+    for office, books in offices.items():
+        text_lines.append(f"\n🏢 **{office}**")
+        for b in books:
+            line = f"  • {b['title']} — {b['author']}"
+            if office == "Stone Towers" and b['shelf'] and b['floor']:
+                line += f" (полка {b['shelf']}, этаж {b['floor']})"
+            text_lines.append(line)
+
+    full_text = "\n".join(text_lines)
+    if len(full_text) <= 4096:
+        await target_message.reply(full_text, parse_mode="Markdown")
+    else:
+        part = 1
+        chunk = ""
+        for line in text_lines:
+            if len(chunk) + len(line) > 4000:
+                await target_message.reply(f"📚 Каталог (часть {part}):\n{chunk}", parse_mode="Markdown")
+                part += 1
+                chunk = line + "\n"
+            else:
+                chunk += line + "\n"
+        if chunk:
+            await target_message.reply(f"📚 Каталог (часть {part}):\n{chunk}", parse_mode="Markdown")
+
+async def start_books_edit(cmd_message: Message):
+    global group_awaiting_action, group_awaiting_author
+    group_awaiting_action = 'books'
+    group_awaiting_author = cmd_message.from_user.id
+    await cmd_message.reply(
+        "📘 **Режим редактирования каталога**\n\n"
+        "**➕ Добавление книги:**\n"
+        "`+, Название, Автор, Офис, Этаж, Полка`\n"
+        "• Этаж и полка — числа, **обязательны для Stone Towers**.\n"
+        "• Для других офисов ставьте `-`.\n"
+        "• Дубликаты **разрешены** – можно добавить сколько угодно копий.\n\n"
+        "**➖ Удаление книги (ВСЕХ копий):**\n"
+        "`-, Название, Офис`\n"
+        "• Удаляются **все строки** с таким названием и офисом.\n\n"
+        "📌 **Примеры:**\n"
+        "`+, Мастер и Маргарита, Булгаков, Stone Towers, 7, 2`\n"
+        "`-, Мастер и Маргарита, Stone Towers`"
+    )
+
+async def process_books_edit(message: Message):
+    global group_awaiting_action, group_awaiting_author
+    lines = message.text.strip().split('\n')
+    results = []
+    async with db.pool.acquire() as conn:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) < 2:
+                results.append(f"❌ Пропущена строка (недостаточно данных): {line}")
+                continue
+
+            action = parts[0]
+            title = parts[1]
+
+            if action == '+':
+                if len(parts) < 6:
+                    results.append(f"❌ Добавление: нужно минимум 6 полей: {line}")
+                    continue
+                author = parts[2]
+                office = parts[3]
+                try:
+                    floor = int(parts[4]) if parts[4].strip() not in ('-', '') else None
+                    shelf = int(parts[5]) if parts[5].strip() not in ('-', '') else None
+                except ValueError:
+                    results.append(f"❌ Этаж/полка должны быть числами или '-': {line}")
+                    continue
+
+                if office == "Stone Towers" and (floor is None or shelf is None):
+                    results.append(f"❌ Для Stone Towers нужно указать и этаж, и полку: {line}")
+                    continue
+
+                await conn.execute(
+                    '''
+                    INSERT INTO books (title, author, office, shelf, floor, status)
+                    VALUES ($1, $2, $3, $4, $5, 'available')
+                    ''',
+                    title, author, office, shelf, floor
+                )
+                results.append(f"✅ Добавлена копия: '{title}' ({office})")
+
+            elif action == '-':
+                if len(parts) < 3:
+                    results.append(f"❌ Удаление: нужно указать название и офис: {line}")
+                    continue
+                office = parts[2]
+
+                deleted = await conn.execute(
+                    'DELETE FROM books WHERE LOWER(title) = LOWER($1) AND office = $2',
+                    title, office
+                )
+                deleted_count = deleted.split()[1] if hasattr(deleted, 'split') else '0'
+                results.append(f"✅ Удалено копий: {deleted_count} — '{title}' ({office})")
+
+            else:
+                results.append(f"❌ Неизвестное действие (ожидалось + или -): {line}")
+
+    report = "📊 **Результат обработки каталога:**\n\n" + "\n".join(results)
+    await message.reply(report, parse_mode="Markdown")
+    group_awaiting_action = None
+    group_awaiting_author = None
+
+async def start_users_edit(cmd_message: Message):
+    global group_awaiting_action, group_awaiting_author
+    group_awaiting_action = 'users'
+    group_awaiting_author = cmd_message.from_user.id
+    await cmd_message.reply(
+        "👥 **Режим управления пользователями**\n\n"
+        "Направьте список действий в формате:\n"
+        "`!!! telegram_id` — **удалить** пользователя (все его данные)\n"
+        "`? telegram_id, имя, фамилия` — **отредактировать** имя/фамилию\n\n"
+        "Каждое действие с новой строки.\n"
+        "📌 **Пример:**\n"
+        "!!! 123456789\n"
+        "? 987654321, Иван, Петров"
+    )
+
+async def process_users_edit(message: Message):
+    global group_awaiting_action, group_awaiting_author
+    lines = message.text.strip().split('\n')
+    results = []
+    async with db.pool.acquire() as conn:
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith('!!!'):
+                parts = line[3:].strip().split()
+                if len(parts) < 1:
+                    results.append(f"❌ Не указан ID: {line}")
+                    continue
+                try:
+                    uid = int(parts[0])
+                except ValueError:
+                    results.append(f"❌ Некорректный ID: {parts[0]}")
+                    continue
+
+                user = await conn.fetchval('SELECT user_id FROM users WHERE user_id = $1', uid)
+                if not user:
+                    results.append(f"❌ Пользователь {uid} не найден")
+                    continue
+
+                async with conn.transaction():
+                    await conn.execute('DELETE FROM waiting_list WHERE user_id = $1', uid)
+                    await conn.execute('DELETE FROM bookings WHERE user_id = $1', uid)
+                    await conn.execute('DELETE FROM users WHERE user_id = $1', uid)
+                results.append(f"✅ Пользователь {uid} полностью удалён")
+
+            elif line.startswith('?'):
+                parts = line[1:].strip().split(',', 2)
+                if len(parts) < 3:
+                    results.append(f"❌ Недостаточно данных: {line}")
+                    continue
+                try:
+                    uid = int(parts[0].strip())
+                except ValueError:
+                    results.append(f"❌ Некорректный ID: {parts[0]}")
+                    continue
+                first_name = parts[1].strip()
+                last_name = parts[2].strip()
+
+                user = await conn.fetchval('SELECT user_id FROM users WHERE user_id = $1', uid)
+                if not user:
+                    results.append(f"❌ Пользователь {uid} не найден")
+                    continue
+
+                await conn.execute(
+                    'UPDATE users SET first_name = $1, last_name = $2 WHERE user_id = $3',
+                    first_name, last_name, uid
+                )
+                results.append(f"✅ Пользователь {uid} обновлён: {first_name} {last_name}")
+
+            else:
+                results.append(f"❌ Неизвестный формат: {line}")
+
+    report = "📊 **Результат обработки пользователей:**\n\n" + "\n".join(results)
+    await message.reply(report, parse_mode="Markdown")
+    group_awaiting_action = None
+    group_awaiting_author = None
+
+# ------------------------------ Статистика ------------------------------
 async def send_statistics(trigger_message: Message):
     """Собирает статистику по всем пользователям и отправляет в группу"""
     async with db.pool.acquire() as conn:
-        # Все пользователи
         users = await conn.fetch('SELECT user_id, first_name, last_name FROM users ORDER BY user_id')
         
         if not users:
@@ -1338,31 +1614,26 @@ async def send_statistics(trigger_message: Message):
             last = user['last_name'] or ''
             full_name = f"{first} {last}".strip()
 
-            # Активные бронирования (статус 'active')
             active = await conn.fetchval(
                 'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2',
                 uid, 'active'
             ) or 0
 
-            # Завершённые без продления
             completed_no_ext = await conn.fetchval(
                 'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2 AND extension_made = $3',
                 uid, 'completed', False
             ) or 0
 
-            # Завершённые с продлением
             completed_ext = await conn.fetchval(
                 'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND status = $2 AND extension_made = $3',
                 uid, 'completed', True
             ) or 0
 
-            # Просроченные (было отправлено уведомление о просрочке)
             overdue = await conn.fetchval(
                 'SELECT COUNT(*) FROM bookings WHERE user_id = $1 AND overdue_notified = $2',
                 uid, True
             ) or 0
 
-            # Статистика для одного пользователя
             line = (
                 f"• {uid} — {full_name}\n"
                 f"  ▫️ Активных: {active} | Заверш. без продл.: {completed_no_ext} | "
@@ -1370,14 +1641,11 @@ async def send_statistics(trigger_message: Message):
             )
             lines.append(line)
 
-    # Разбиваем на части, если сообщение слишком длинное
     full_text = "📊 **Статистика пользователей библиотеки:**\n\n" + "".join(lines)
     
-    # Telegram лимит: 4096 символов
     if len(full_text) <= 4096:
         await trigger_message.reply(full_text, parse_mode="Markdown")
     else:
-        # Отправляем по частям
         parts = []
         current_part = "📊 **Статистика (часть 1):**\n\n"
         part_num = 1
@@ -1391,19 +1659,43 @@ async def send_statistics(trigger_message: Message):
 
         for part in parts:
             await trigger_message.reply(part, parse_mode="Markdown")
-            await asyncio.sleep(0.3)  # небольшая пауза между сообщениями
+            await asyncio.sleep(0.3)
 
-# ------------------------------ Массовая рассылка из группы ------------------------------
+# ------------------------------ Единый обработчик группы ------------------------------
 @router.message(F.chat.id == GROUP_CHAT_ID, F.text, ~F.from_user.is_bot)
-async def broadcast_from_group(message: Message):
-    # Статистика
-    if message.text.strip().lower() == "статистика":
+async def group_text_handler(message: Message):
+    """Единый обработчик всех текстовых сообщений в группе"""
+    global group_awaiting_action, group_awaiting_author
+    text = message.text.strip()
+    user_id = message.from_user.id
+
+    # ---------- 1. АДМИН-КОМАНДЫ ----------
+    if text.lower() == "книги":
+        await send_all_books_list(message)
+        return
+
+    if text == "!книги!":
+        await start_books_edit(message)
+        return
+
+    if text == "!пользователи!":
+        await start_users_edit(message)
+        return
+
+    # ---------- 2. ОЖИДАНИЕ ВВОДА СПИСКОВ ----------
+    if group_awaiting_action and user_id == group_awaiting_author:
+        if group_awaiting_action == 'books':
+            await process_books_edit(message)
+        elif group_awaiting_action == 'users':
+            await process_users_edit(message)
+        return
+
+    # ---------- 3. СТАТИСТИКА ----------
+    if text.lower() == "статистика":
         await send_statistics(message)
         return
 
-    # Рассылка
-    if message.from_user.id == bot.id:
-        return
+    # ---------- 4. МАССОВАЯ РАССЫЛКА ----------
     async with db.pool.acquire() as conn:
         user_ids = await conn.fetch('SELECT user_id FROM users')
     if not user_ids:
@@ -1455,4 +1747,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
