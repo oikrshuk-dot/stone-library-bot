@@ -234,16 +234,27 @@ async def get_books_by_office(office: str):
             office, 'available'
         )
 
-async def book_exists_in_office(title: str, office: str):
-    """Возвращает информацию о первом доступном экземпляре книги в офисе"""
+async def get_book_by_title_any_status(title: str, office: str):
+    """Проверяет, существует ли книга в офисе (любой статус). Возвращает первую запись."""
     async with db.pool.acquire() as conn:
         return await conn.fetchrow(
             '''
-            SELECT id, title, author, shelf, floor 
+            SELECT id, title, author, shelf, floor, status
             FROM books 
-            WHERE LOWER(title) = LOWER($1) 
-              AND office = $2 
-              AND status = 'available'
+            WHERE LOWER(title) = LOWER($1) AND office = $2
+            LIMIT 1
+            ''',
+            title, office
+        )
+
+async def get_available_book_instance(title: str, office: str):
+    """Возвращает ОДИН доступный экземпляр книги в офисе (status = 'available')."""
+    async with db.pool.acquire() as conn:
+        return await conn.fetchrow(
+            '''
+            SELECT id, title, author, shelf, floor
+            FROM books 
+            WHERE LOWER(title) = LOWER($1) AND office = $2 AND status = 'available'
             LIMIT 1
             ''',
             title, office
@@ -859,7 +870,7 @@ async def cmd_request(message: Message, state: FSMContext):
         await message.answer("❌ У вас уже есть активное бронирование. Сначала верните книгу.")
         return
 
-    await remove_book_command(uid)  # сброс на /rules
+    await remove_book_command(uid)
     user_info = await get_user_info(uid)
     if not user_info:
         await message.answer("❌ Ошибка: пользователь не найден. Напишите /start")
@@ -993,7 +1004,6 @@ async def process_book_title(message: Message, state: FSMContext):
 
     title_input = message.text.strip()
     if title_input.lower() == "нет":
-        # Добавляем команды /book и /request в меню
         await add_book_and_request_commands(message.from_user.id)
         await message.answer(
             f"{first_name}, жаль что тут нет подходящей для Вас книги.\n\n"
@@ -1003,8 +1013,9 @@ async def process_book_title(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    book_info = await book_exists_in_office(title_input, office)
-    if not book_info:
+    # 1️⃣ Проверяем, есть ли такая книга в офисе (любой статус)
+    book_any = await get_book_by_title_any_status(title_input, office)
+    if not book_any:
         await message.answer(
             "Такой книги нет в нашей библиотеке. "
             "Хочешь забронировать другую книгу или не будешь ничего бронировать?",
@@ -1013,27 +1024,35 @@ async def process_book_title(message: Message, state: FSMContext):
         await state.set_state(UserStates.waiting_for_confirmation)
         return
 
-    title = book_info['title']
-    author = book_info['author']
-    status = book_info['status']
-    shelf = book_info['shelf']
-    floor = book_info['floor']
-    book_id = book_info['id']
-
-    if status == 'booked':
+    # 2️⃣ Проверяем, есть ли доступный экземпляр
+    available_book = await get_available_book_instance(title_input, office)
+    if not available_book:
+        # Книга есть, но все экземпляры заняты → лист ожидания
         await message.answer(
-            f"Книга '{title}' от автора {author} сейчас находится у другого пользователя. "
+            f"Книга '{book_any['title']}' от автора {book_any['author']} сейчас находится у другого пользователя. "
             "Хотите ли добавить книгу в лист ожидания?",
             reply_markup=get_waitlist_choice_keyboard()
         )
-        await state.update_data(book_title=title, author=author)
+        await state.update_data(
+            book_title=book_any['title'],
+            author=book_any['author'],
+            office=office
+        )
         await state.set_state(UserStates.waiting_for_waitlist_choice)
         return
+
+    # 3️⃣ Книга доступна – берём данные из available_book
+    title = available_book['title']
+    author = available_book['author']
+    book_id = available_book['id']
+    shelf = available_book.get('shelf')
+    floor = available_book.get('floor')
 
     msg = f"{first_name}, "
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{title}' находится на этаже {floor} на полке {shelf}. "
     msg += f"Хочешь забронировать книгу '{title}' от автора {author}?"
+
     await state.update_data(
         book_title=title,
         author=author,
@@ -1089,29 +1108,37 @@ async def process_waitlist_book(callback: CallbackQuery, state: FSMContext):
         return
     book_title = "_".join(parts[2:-1])
     office = parts[-1]
+
     user_info = await get_user_info(callback.from_user.id)
     if not user_info:
         await callback.answer("Ошибка: пользователь не найден")
         return
     first_name = user_info['first_name']
-    book_info = await book_exists_in_office(book_title, office)
-    if not book_info or book_info['status'] != 'available':
-        await callback.answer("Книга больше не доступна")
+
+    # Проверяем, есть ли доступный экземпляр
+    available_book = await get_available_book_instance(book_title, office)
+    if not available_book:
+        await callback.answer("❌ Книга больше не доступна", show_alert=True)
         return
-    shelf = book_info['shelf']
-    floor = book_info['floor']
-    book_id = book_info['id']
+
+    book_id = available_book['id']
+    shelf = available_book.get('shelf')
+    floor = available_book.get('floor')
+    author = available_book['author']
+
     await state.update_data(
         book_title=book_title,
-        author=book_info['author'],
+        author=author,
         office=office,
         first_name=first_name,
         book_id=book_id
     )
+
     msg = f"{first_name}, "
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{book_title}' находится на этаже {floor} на полке {shelf}. "
-    msg += f"Хочешь забронировать книгу '{book_title}' от автора {book_info['author']}?"
+    msg += f"Хочешь забронировать книгу '{book_title}' от автора {author}?"
+
     await callback.message.edit_text(msg, reply_markup=get_confirmation_keyboard())
     await state.set_state(UserStates.waiting_for_confirmation)
 
@@ -1389,7 +1416,6 @@ async def process_book_request(message: Message, state: FSMContext):
     await state.clear()
 
 # ------------------------------ Админ-функции для работы с книгами и пользователями ------------------------------
-
 async def send_all_books_list(target_message: Message):
     """Отправляет в группу полный каталог книг (с полками/этажами для Stone Towers)"""
     async with db.pool.acquire() as conn:
