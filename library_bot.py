@@ -1667,24 +1667,24 @@ async def send_statistics(trigger_message: Message):
             )
             lines.append(line)
 
-    full_text = "📊 **Статистика пользователей библиотеки:**\n\n" + "".join(lines)
+    full_text = "📊 Статистика пользователей библиотеки:\n\n" + "".join(lines)
     
     if len(full_text) <= 4096:
-        await trigger_message.reply(full_text, parse_mode="Markdown")
+        await trigger_message.reply(full_text)   # 👈 убрали parse_mode
     else:
         parts = []
-        current_part = "📊 **Статистика (часть 1):**\n\n"
+        current_part = "📊 Статистика (часть 1):\n\n"
         part_num = 1
         for line in lines:
             if len(current_part) + len(line) > 4000:
                 parts.append(current_part)
                 part_num += 1
-                current_part = f"📊 **Статистика (часть {part_num}):**\n\n"
+                current_part = f"📊 Статистика (часть {part_num}):\n\n"
             current_part += line
         parts.append(current_part)
 
         for part in parts:
-            await trigger_message.reply(part, parse_mode="Markdown")
+            await trigger_message.reply(part)    # 👈 и здесь тоже
             await asyncio.sleep(0.3)
 
 # ------------------------------ Единый обработчик группы ------------------------------
@@ -1773,3 +1773,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
