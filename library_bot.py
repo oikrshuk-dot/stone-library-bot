@@ -604,7 +604,7 @@ async def process_start_booking(message: Message, state: FSMContext):
     user_info = await get_user_info(message.from_user.id)
     if not user_info:
         await message.answer(
-            "Похоже, мы с тобой ещё не знакомились. Напиши, пожалуйста, свои Имя и Фамилию",
+            "Похоже, мы с вами ещё не знакомились. Напишите, пожалуйста, ваши Имя и Фамилию через пробел",
             reply_markup=None
         )
         await state.set_state(UserStates.waiting_for_name)
@@ -795,7 +795,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
-                "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+                "Вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
                 reply_markup=get_action_keyboard()
             )
             await state.set_state(UserStates.waiting_for_book_title)
@@ -804,7 +804,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await message.answer(
                 f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
-                f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+                f"{first_name}, выберите, пожалуйста, офис, в котором работаете, "
                 "чтобы я мог подсказать книги в наличии",
                 reply_markup=get_office_keyboard()
             )
@@ -814,7 +814,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(
             "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
             "а также забронировать ту книгу, которая вам интересна. "
-            "Для начала давайте познакомимся! Напишите, пожалуйста, свои Имя и Фамилию"
+            "Для начала давайте познакомимся! Напишите, пожалуйста, свои Имя и Фамилию через пробел"
         )
         await state.set_state(UserStates.waiting_for_name)
 
@@ -848,7 +848,7 @@ async def cmd_return(message: Message, state: FSMContext):
         booking_id=booking_id,
         book_id=book_id
     )
-    await message.answer("📸 Отправьте, пожалуйста, фото книги в библиотеке.")
+    await message.answer("📸 Отправьте, пожалуйста, фотографию книги в библиотеке")
 
 @router.message(Command("book"))
 async def cmd_book(message: Message, state: FSMContext):
@@ -879,7 +879,7 @@ async def cmd_request(message: Message, state: FSMContext):
         "Мы рады пополнению! Новые книги должны соответствовать одному из критериев:\n"
         "• О бизнесе и управлении\n"
         "• О процессах и культуре нашей компании\n"
-        "• Социально-психологическая литература\n\n"
+        "• О социально-психологических процессах\n\n"
         "Не добавляем: учебники, техническую документацию, современную массовую литературу без художественной ценности.\n\n"
         "Напишите, пожалуйста, название интересующей вас книги и автора данной книги."
     )
@@ -888,7 +888,7 @@ async def cmd_request(message: Message, state: FSMContext):
 async def process_name(message: Message, state: FSMContext):
     parts = message.text.split()
     if len(parts) < 2:
-        await message.answer("Пожалуйста, введите ваше Имя и Фамилию через пробел.")
+        await message.answer("Пожалуйста, введите ваши Имя и Фамилию через пробел.")
         return
     first_name = parts[0]
     last_name = " ".join(parts[1:])
@@ -914,20 +914,20 @@ async def process_accept_rules(callback: CallbackQuery, state: FSMContext):
     if user_exists:
         if office:
             await callback.message.edit_text(
-                f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+                f"{first_name}, вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
                 reply_markup=get_action_keyboard()
             )
             await state.set_state(UserStates.waiting_for_book_title)
         else:
             await callback.message.edit_text(
-                f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+                f"{first_name}, выберите, пожалуйста, офис, в котором работаете, "
                 "чтобы я мог подсказать книги в наличии",
                 reply_markup=get_office_keyboard()
             )
             await state.set_state(UserStates.waiting_for_office)
     else:
         await callback.message.edit_text(
-            f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+            f"{first_name}, выберите, пожалуйста, офис, в котором работаете, "
             "чтобы я мог подсказать книги в наличии",
             reply_markup=get_office_keyboard()
         )
@@ -942,7 +942,7 @@ async def process_accept_rules(callback: CallbackQuery, state: FSMContext):
     UserStates.waiting_for_return_completion))
 async def ignore_text_in_button_states(message: Message):
     await message.answer(
-        "Пожалуйста, используй кнопки для выбора. "
+        "Пожалуйста, используйте кнопки для выбора. "
         "Текстовые сообщения в этом состоянии не обрабатываются."
     )
 
@@ -960,14 +960,14 @@ async def process_office(callback: CallbackQuery, state: FSMContext):
     await update_user_office(callback.from_user.id, office)
     await state.update_data(office=office)
     await callback.message.edit_text(
-        "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+        "Вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
         reply_markup=get_action_keyboard()
     )
     await state.set_state(UserStates.waiting_for_book_title)
 
 @router.callback_query(StateFilter(UserStates.waiting_for_book_title), F.data == "action_book")
 async def process_action_book(callback: CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Напиши, пожалуйста, название книги")
+    await callback.message.edit_text("Напишите, пожалуйста, название книги")
     await state.set_state(UserStates.waiting_for_book_title)
 
 @router.callback_query(StateFilter(UserStates.waiting_for_book_title), F.data == "action_list")
@@ -980,8 +980,8 @@ async def process_action_list(callback: CallbackQuery, state: FSMContext):
     books = await get_books_by_office(office)
     await callback.message.edit_text(
         f"{format_books_list(books)}\n\n"
-        "Как только выберешь нужную книгу, просто напиши мне её название. "
-        "Если не нашёл для себя подходящей книги, напиши Нет"
+        "Как только выберете нужную книгу, напишите ее название. "
+        "Если не нашли подходящий вариант, напишите Нет"
     )
     await state.set_state(UserStates.waiting_for_book_title)
 
@@ -999,7 +999,7 @@ async def process_book_title(message: Message, state: FSMContext):
     if title_input.lower() == "нет":
         await add_book_and_request_commands(message.from_user.id)
         await message.answer(
-            f"{first_name}, жаль что тут нет подходящей для Вас книги.\n\n"
+            f"{first_name}, к сожалению, подходящей книги сейчас нет. \n\n"
             "Вы можете забронировать любую другую книгу или направить запрос в HR для заказа интересующей Вас книги.\n"
             "Для этого нажмите соответствующие кнопки в меню."
         )
@@ -1011,7 +1011,7 @@ async def process_book_title(message: Message, state: FSMContext):
     if not book_any:
         await message.answer(
             "Такой книги нет в нашей библиотеке. "
-            "Хочешь забронировать другую книгу или не будешь ничего бронировать?",
+            "Хотите забронировать другую книгу или не будете ничего бронировать?",
             reply_markup=get_return_options_keyboard()
         )
         await state.set_state(UserStates.waiting_for_confirmation)
@@ -1023,7 +1023,7 @@ async def process_book_title(message: Message, state: FSMContext):
         #Книга есть, но все экземпляры заняты → лист ожидания
         await message.answer(
             f"Книга '{book_any['title']}' от автора {book_any['author']} сейчас находится у другого пользователя. "
-            "Хотите ли добавить книгу в лист ожидания?",
+            "Хотите добавить книгу в лист ожидания?",
             reply_markup=get_waitlist_choice_keyboard()
         )
         await state.update_data(
@@ -1044,7 +1044,7 @@ async def process_book_title(message: Message, state: FSMContext):
     msg = f"{first_name}, "
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{title}' находится на этаже {floor} на полке {shelf}. "
-    msg += f"Хочешь забронировать книгу '{title}' от автора {author}?"
+    msg += f"Хотите забронировать книгу '{title}' от автора {author}?"
 
     await state.update_data(
         book_title=title,
@@ -1088,7 +1088,7 @@ async def process_waitlist_other(callback: CallbackQuery, state: FSMContext):
     first_name = data.get('first_name')
     office = data.get('office')
     await callback.message.edit_text(
-        f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+        f"{first_name}, Вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
         reply_markup=get_action_keyboard()
     )
     await state.set_state(UserStates.waiting_for_book_title)
@@ -1766,3 +1766,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
