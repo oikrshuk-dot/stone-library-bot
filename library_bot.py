@@ -46,8 +46,8 @@ dp.include_router(router)
 RULES_URL = "https://docs.google.com/document/d/1l9nUMiQPCYPPoV_deUjroP2BZb6MRRRBVtw_D57NAxs/edit?usp=sharing"
 
 # ------------------------------ Глобальные переменные для админ-режимов ------------------------------
-group_awaiting_action = None      # 'books' или 'users'
-group_awaiting_author = None     # user_id, кто вызвал команду
+group_awaiting_action = None
+group_awaiting_author = None
 
 # ------------------------------ База данных ------------------------------
 class Database:
@@ -303,9 +303,7 @@ async def create_booking(user_id: int, book_id: int, book_title: str, office: st
             raise ValueError(f"Неизвестная длительность: {duration}")
 
         async with conn.transaction():
-            # Обновляем статус конкретного экземпляра
             await update_book_status(book_id, "booked")
-            # Удаляем пользователя из листа ожидания для этой книги
             await remove_from_waiting_list(user_id, book_title, office)
 
             booking_id = await conn.fetchval(
@@ -329,13 +327,10 @@ async def create_booking(user_id: int, book_id: int, book_title: str, office: st
         return booking_id, end_time
 
 async def complete_booking(user_id: int, booking_id: int, book_id: int, book_title: str, office: str):
-    """Завершает бронь и освобождает конкретный экземпляр"""
+    """Завершаем бронь и освобождаем конкретный экземпляр"""
     async with db.pool.acquire() as conn:
         async with conn.transaction():
-            # Освобождаем конкретный экземпляр
             await update_book_status(book_id, "available")
-            
-            # Обновляем пользователя
             await conn.execute(
                 '''
                 UPDATE users 
@@ -345,13 +340,11 @@ async def complete_booking(user_id: int, booking_id: int, book_id: int, book_tit
                 user_id
             )
             
-            # Помечаем бронь как завершённую
             await conn.execute(
                 'UPDATE bookings SET status = $1 WHERE id = $2',
                 'completed', booking_id
             )
             
-            # Уведомляем следующих в листе ожидания
             await notify_next_in_waiting_list(book_title, office)
 
 async def extend_booking(booking_id: int, user_id: int, book_title: str, office: str):
@@ -607,7 +600,7 @@ async def safe_edit_message(message, text: str, reply_markup: Optional[InlineKey
             raise
 
 async def process_start_booking(message: Message, state: FSMContext):
-    """Общая логика начала бронирования (вызывается из cmd_book и action_book)"""
+    """Общая логика начала бронирования"""
     user_info = await get_user_info(message.from_user.id)
     if not user_info:
         await message.answer(
@@ -1013,7 +1006,7 @@ async def process_book_title(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # 1️⃣ Проверяем, есть ли такая книга в офисе (любой статус)
+    #Проверяем, есть ли такая книга в офисе
     book_any = await get_book_by_title_any_status(title_input, office)
     if not book_any:
         await message.answer(
@@ -1024,10 +1017,10 @@ async def process_book_title(message: Message, state: FSMContext):
         await state.set_state(UserStates.waiting_for_confirmation)
         return
 
-    # 2️⃣ Проверяем, есть ли доступный экземпляр
+    #Проверяем, есть ли доступный экземпляр
     available_book = await get_available_book_instance(title_input, office)
     if not available_book:
-        # Книга есть, но все экземпляры заняты → лист ожидания
+        #Книга есть, но все экземпляры заняты → лист ожидания
         await message.answer(
             f"Книга '{book_any['title']}' от автора {book_any['author']} сейчас находится у другого пользователя. "
             "Хотите ли добавить книгу в лист ожидания?",
@@ -1041,7 +1034,7 @@ async def process_book_title(message: Message, state: FSMContext):
         await state.set_state(UserStates.waiting_for_waitlist_choice)
         return
 
-    # 3️⃣ Книга доступна – берём данные из available_book
+    #Книга доступна
     title = available_book['title']
     author = available_book['author']
     book_id = available_book['id']
@@ -1415,7 +1408,7 @@ async def process_book_request(message: Message, state: FSMContext):
     )
     await state.clear()
 
-# ------------------------------ Админ-функции для работы с книгами и пользователями ------------------------------
+# ------------------------------ Админ-функции ------------------------------
 async def send_all_books_list(target_message: Message):
     """Отправляет в группу полный каталог книг (с полками/этажами для Stone Towers)"""
     async with db.pool.acquire() as conn:
@@ -1695,7 +1688,7 @@ async def group_text_handler(message: Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
-    # ---------- 1. АДМИН-КОМАНДЫ ----------
+    # ---------- АДМИН-КОМАНДЫ ----------
     if text.lower() == "книги":
         await send_all_books_list(message)
         return
@@ -1708,7 +1701,7 @@ async def group_text_handler(message: Message):
         await start_users_edit(message)
         return
 
-    # ---------- 2. ОЖИДАНИЕ ВВОДА СПИСКОВ ----------
+    # ---------- ОЖИДАНИЕ ВВОДА СПИСКОВ ----------
     if group_awaiting_action and user_id == group_awaiting_author:
         if group_awaiting_action == 'books':
             await process_books_edit(message)
@@ -1716,12 +1709,12 @@ async def group_text_handler(message: Message):
             await process_users_edit(message)
         return
 
-    # ---------- 3. СТАТИСТИКА ----------
+    # ---------- СТАТИСТИКА ----------
     if text.lower() == "статистика":
         await send_statistics(message)
         return
 
-    # ---------- 4. МАССОВАЯ РАССЫЛКА ----------
+    # ---------- МАССОВАЯ РАССЫЛКА ----------
     async with db.pool.acquire() as conn:
         user_ids = await conn.fetch('SELECT user_id FROM users')
     if not user_ids:
@@ -1773,4 +1766,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
