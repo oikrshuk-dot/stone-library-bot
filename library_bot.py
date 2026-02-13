@@ -617,7 +617,7 @@ async def process_start_booking(message: Message, state: FSMContext):
         current_book = booking_info['book_title']
         duration = booking_info['booking_duration']
         await message.answer(
-            f"{first_name}, у тебя уже есть активное бронирование книги '{current_book}' на срок {duration}. "
+            f"{first_name}, у вас уже есть активное бронирование книги '{current_book}' на срок {duration}. "
             f"Сначала верни эту книгу, прежде чем бронировать новую.",
             reply_markup=get_return_book_keyboard(current_book)
         )
@@ -625,14 +625,14 @@ async def process_start_booking(message: Message, state: FSMContext):
 
     if office:
         await message.answer(
-            f"{first_name}, ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+            f"{first_name}, вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
             reply_markup=get_action_keyboard()
         )
         await state.set_state(UserStates.waiting_for_book_title)
         await state.update_data(first_name=first_name, office=office)
     else:
         await message.answer(
-            f"{first_name}, выбери, пожалуйста, офис, в котором ты работаешь, "
+            f"{first_name}, выберите, пожалуйста, офис, в котором работаете, "
             "чтобы я мог подсказать книги в наличии",
             reply_markup=get_office_keyboard()
         )
@@ -677,7 +677,7 @@ async def check_reminders():
                         if now >= remind_15 and now < end:
                             await bot.send_message(
                                 uid,
-                                f"*Не забудь вернуть книгу '{book}' через 15 минут*",
+                                f"*Не забудьте вернуть книгу '{book}' через 15 минут*",
                                 parse_mode="Markdown",
                                 reply_markup=get_return_book_keyboard(book)
                             )
@@ -686,50 +686,50 @@ async def check_reminders():
                         if now.date() == day5.date() and now.hour == 9:
                             await bot.send_message(
                                 uid,
-                                f"Не забудь вернуть книгу '{book}' завтра",
+                                f"Не забудьте вернуть книгу '{book}' завтра",
                                 reply_markup=get_return_book_keyboard(book)
                             )
                         day6 = start + timedelta(days=6)
                         if now.date() == day6.date() and now.hour == 9:
                             await bot.send_message(
                                 uid,
-                                f"Не забудь вернуть книгу '{book}' сегодня",
+                                f"Не забудьте вернуть книгу '{book}' сегодня",
                                 reply_markup=get_return_book_keyboard(book)
                             )
                     elif dur == "1 месяц":
                         day21 = start + timedelta(days=21)
                         if now.date() == day21.date() and now.hour == 9:
-                            await bot.send_message(uid, f"Не забудь вернуть книгу '{book}' через неделю")
+                            await bot.send_message(uid, f"Не забудьте вернуть книгу '{book}' через неделю")
                         day27 = start + timedelta(days=27)
                         if now.date() == day27.date() and now.hour == 9:
                             await bot.send_message(
                                 uid,
-                                f"Не забудь вернуть книгу '{book}' сегодня",
+                                f"Не забудьте вернуть книгу '{book}' сегодня",
                                 reply_markup=get_return_book_keyboard(book)
                             )
                     elif dur == "3 месяца":
                         week_before = end - timedelta(days=7)
                         if now.date() == week_before.date() and now.hour == 9:
-                            await bot.send_message(uid, f"Не забудь вернуть книгу '{book}' через неделю")
+                            await bot.send_message(uid, f"Не забудьте вернуть книгу '{book}' через неделю")
                         day_before = end - timedelta(days=1)
                         if now.date() == day_before.date() and now.hour == 9:
                             await bot.send_message(
                                 uid,
-                                f"Не забудь вернуть книгу '{book}' завтра",
+                                f"Не забудьте вернуть книгу '{book}' завтра",
                                 reply_markup=get_return_book_keyboard(book)
                             )
                     elif dur == "6 месяцев":
                         month_before = end - timedelta(days=30)
                         if now.date() == month_before.date() and now.hour == 9:
-                            await bot.send_message(uid, f"Не забудь вернуть книгу '{book}' через месяц")
+                            await bot.send_message(uid, f"Не забудьте вернуть книгу '{book}' через месяц")
                         week_before = end - timedelta(days=7)
                         if now.date() == week_before.date() and now.hour == 9:
-                            await bot.send_message(uid, f"Не забудь вернуть книгу '{book}' через неделю")
+                            await bot.send_message(uid, f"Не забудьте вернуть книгу '{book}' через неделю")
                         day_before = end - timedelta(days=1)
                         if now.date() == day_before.date() and now.hour == 9:
                             await bot.send_message(
                                 uid,
-                                f"Не забудь вернуть книгу '{book}' завтра",
+                                f"Не забудьте вернуть книгу '{book}' завтра",
                                 reply_markup=get_return_book_keyboard(book)
                             )
 
@@ -744,7 +744,7 @@ async def check_reminders():
                             builder.adjust(1)
                             await bot.send_message(
                                 uid,
-                                f"Бронь книги '{book}' закончилась. Пожалуйста, верни книгу.",
+                                f"Бронь книги '{book}' закончилась. Пожалуйста, верните книгу.",
                                 reply_markup=builder.as_markup()
                             )
                             setattr(check_reminders, last_key, now)
@@ -783,7 +783,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await update_commands_on_start(message.from_user.id, has_booking, current_book)
         else:
             await message.answer(
-                f"{first_name}, перед началом работы прошу Вас ознакомиться с правилами библиотеки и принять их.\n\n"
+                f"{first_name}, перед началом работы прошу вас ознакомиться с правилами библиотеки и принять их.\n\n"
                 f"Правила библиотеки находятся по данной ссылке:\n{RULES_URL}",
                 reply_markup=get_accept_rules_keyboard()
             )
@@ -793,7 +793,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
         if office:
             await message.answer(
-                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+                f"Добрый день, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
                 "Вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
                 reply_markup=get_action_keyboard()
@@ -802,7 +802,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await state.update_data(first_name=first_name, office=office)
         else:
             await message.answer(
-                f"Привет, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+                f"Добрый день, {first_name}! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
                 "а также забронировать ту книгу, которая вам интересна. "
                 f"{first_name}, выберите, пожалуйста, офис, в котором работаете, "
                 "чтобы я мог подсказать книги в наличии",
@@ -812,7 +812,7 @@ async def cmd_start(message: Message, state: FSMContext):
             await state.update_data(first_name=first_name)
     else:
         await message.answer(
-            "Привет! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
+            "Добрый день! Вы зашли в библиотеку Stone. Здесь вы сможете ознакомиться со списком книг в наличии, "
             "а также забронировать ту книгу, которая вам интересна. "
             "Для начала давайте познакомимся! Напишите, пожалуйста, свои Имя и Фамилию через пробел"
         )
@@ -1130,7 +1130,7 @@ async def process_waitlist_book(callback: CallbackQuery, state: FSMContext):
     msg = f"{first_name}, "
     if office == "Stone Towers" and shelf and floor:
         msg += f"книга '{book_title}' находится на этаже {floor} на полке {shelf}. "
-    msg += f"Хочешь забронировать книгу '{book_title}' от автора {author}?"
+    msg += f"Хотите забронировать книгу '{book_title}' от автора {author}?"
 
     await callback.message.edit_text(msg, reply_markup=get_confirmation_keyboard())
     await state.set_state(UserStates.waiting_for_confirmation)
@@ -1140,8 +1140,8 @@ async def process_confirmation_yes(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     first_name = data.get('first_name')
     await callback.message.edit_text(
-        f"{first_name}, выбери, пожалуйста, промежуток времени, "
-        "на который ты хочешь забронировать книгу",
+        f"{first_name}, выберите, пожалуйста, промежуток времени, "
+        "на который вы хотите забронировать книгу",
         reply_markup=get_duration_keyboard()
     )
     await state.set_state(UserStates.waiting_for_duration)
@@ -1153,7 +1153,7 @@ async def process_confirmation_no(callback: CallbackQuery, state: FSMContext):
     builder.button(text="Забронировать другую", callback_data="return_another")
     builder.adjust(1)
     await callback.message.edit_text(
-        "Ты не будешь бронировать книгу или ты решил забронировать другую?",
+        "Вы не будете бронировать книгу или хотите выбрать другую?",
         reply_markup=builder.as_markup()
     )
     await state.set_state(UserStates.waiting_for_confirmation)
@@ -1173,7 +1173,7 @@ async def process_return_cancel(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(StateFilter(UserStates.waiting_for_confirmation), F.data == "return_another")
 async def process_return_another(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
-        "Ты уже знаешь, какую книгу хочешь забронировать или хочешь для начала ознакомиться со списком книг в наличии?",
+        "Вы уже определились с выбором книги для бронирования или хотите сначала ознакомиться со списком доступных книг?",
         reply_markup=get_action_keyboard()
     )
     await state.set_state(UserStates.waiting_for_book_title)
@@ -1216,7 +1216,7 @@ async def process_duration(callback: CallbackQuery, state: FSMContext):
             )
         await safe_edit_message(
             callback.message,
-            f"{first_name}, ты бронируешь книгу '{book_title}' на {dur}.",
+            f"{first_name}, вы бронируете книгу '{book_title}' на {dur}.",
             reply_markup=get_finish_booking_keyboard()
         )
         await state.update_data(book_title=book_title, duration=dur, office=office, first_name=first_name)
@@ -1261,7 +1261,7 @@ async def process_return_book(callback: CallbackQuery, state: FSMContext):
     booking_id = booking_info['booking_id']
     book_id = booking_info['book_id']
 
-    await callback.message.edit_text("📸 Отправь, пожалуйста, фото книги в библиотеке.")
+    await callback.message.edit_text("📸 Отправьте, пожалуйста, фотографию книги в библиотеки")
     await state.set_state(UserStates.waiting_for_photo)
     await state.update_data(
         book_title=book_title,
@@ -1296,7 +1296,7 @@ async def process_return_photo(message: Message, state: FSMContext):
             caption=f"❎️ Возврат: Пользователь {first_name} {last_name} (ID: {message.from_user.id}) вернул книгу '{book_title}'"
         )
         await message.answer(
-            "Спасибо, что вернул книгу. Надеюсь, она была интересной и понравилась тебе.",
+            "Спасибо, что вернули книгу. Надеемся, что она была интересной и понравилась вам.",
             reply_markup=get_finish_return_keyboard()
         )
         await state.update_data(book_title=book_title, office=office, first_name=first_name, last_name=last_name)
@@ -1766,4 +1766,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
